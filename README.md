@@ -2,7 +2,7 @@
 
 115 网页播放器字幕助手 — 自动搜索、下载并叠加字幕到 115 网盘在线播放器上。
 
-[![点击安装](https://img.shields.io/badge/Tampermonkey-%E7%82%B9%E5%87%BB%E5%AE%89%E8%A3%85-brightgreen?logo=tampermonkey)](https://raw.githubusercontent.com/fireinrain/115-autosubtitle/main/dist/115-subtitle-assistant.user.js)
+[![点击安装](https://img.shields.io/badge/Tampermonkey-%E7%82%B9%E5%87%BB%E5%AE%89%E8%A3%85-brightgreen?logo=tampermonkey)](https://github.com/fireinrain/115-autosubtitle/releases/latest/download/115-subtitle-assistant.user.js)
 
 ---
 
@@ -26,7 +26,7 @@
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 浏览器扩展
 2. 点击下方按钮安装脚本：
 
-[![点击安装](https://img.shields.io/badge/Tampermonkey-%E7%82%B9%E5%87%BB%E5%AE%89%E8%A3%85-brightgreen?logo=tampermonkey)](https://raw.githubusercontent.com/fireinrain/115-autosubtitle/main/dist/115-subtitle-assistant.user.js)
+[![点击安装](https://img.shields.io/badge/Tampermonkey-%E7%82%B9%E5%87%BB%E5%AE%89%E8%A3%85-brightgreen?logo=tampermonkey)](https://github.com/fireinrain/115-autosubtitle/releases/latest/download/115-subtitle-assistant.user.js)
 
 3. Tampermonkey 会自动弹出安装确认页，点击"安装"即可
 

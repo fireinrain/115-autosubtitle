@@ -1,15 +1,17 @@
-name: Build and Commit dist
+name: Build and Release
 
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - dist/115-subtitle-assistant.user.js
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-and-commit:
+  build-and-release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,6 +31,12 @@ jobs:
       - name: Run build
         run: npm run build
 
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+
       - name: Commit and push dist
         run: |
           git config user.name "github-actions[bot]"
@@ -37,6 +45,15 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to dist, skip commit"
           else
-            git commit -m "build: update dist [skip ci]"
+            git commit -m "build: update dist to ${{ steps.version.outputs.version }} [skip ci]"
             git push
           fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          files: dist/115-subtitle-assistant.user.js
+          generate_release_notes: true
+          prerelease: false

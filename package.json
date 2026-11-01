@@ -1,0 +1,23 @@
+{
+  "name": "115-autosubtitle",
+  "version": "0.1.0",
+  "description": "115 网页播放器字幕搜索、显示与本地缓存（Tampermonkey Userscript）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "fake-indexeddb": "^6.2.7",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.5",
+    "vite-plugin-monkey": "^8.1.1",
+    "vitest": "^5.0.5"
+  },
+  "private": true
+}

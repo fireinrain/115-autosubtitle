@@ -659,6 +659,15 @@
 			if (prev && prev.videoKey === next.videoKey && prev.code === next.code && prev.originalFileName === next.originalFileName) return;
 			this.currentIdentity = next;
 			this.events.onVideoChange?.(next);
+			if (prev && prev.videoKey !== next.videoKey && !this.currentSubtitleId && this.settings?.autoLoadCachedSubtitle) this.restoreCachedSubtitle(next.videoKey);
+		}
+		async restoreCachedSubtitle(videoKey) {
+			const gen = this.generation;
+			const cached = await subtitleRepository.getSelectedForVideo(videoKey);
+			if (gen !== this.generation || !cached || this.currentSubtitleId) return;
+			this.currentSubtitleId = cached.id;
+			this.loadCues(cached.cues);
+			this.events.onSubtitleLoaded?.(cached.title, cached.id);
 		}
 		isSameVideo(a, b) {
 			if (a.video !== b.video) return false;
@@ -707,6 +716,7 @@
 		bindVideoEvents(video) {
 			const handlers = [
 				["loadedmetadata", () => this.onMetadata(video)],
+				["seeking", () => this.refresh()],
 				["seeked", () => this.refresh()],
 				["playing", () => this.startRenderLoop(video)],
 				["pause", () => {

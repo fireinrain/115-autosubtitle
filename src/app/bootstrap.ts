@@ -1,31 +1,27 @@
-import { m115VideoAdapter } from "../player/m115-video-adapter";
-import { PlayerController } from "../player/player-controller";
-import { SubtitlePanel } from "../ui/panel";
-import { settingsService, type GlobalSettings } from "../settings/settings-service";
-import { subtitleRepository } from "../storage/subtitle-repository";
-import { subtitleSearchEngine } from "../search/search-engine";
-import { providerManager } from "../search/provider-manager";
-import type { SearchProgress } from "../search/provider-manager";
-import {parseSubtitle, detectFormat, PARSER_VERSION} from "../subtitle/parsers";
-import {
-  decodeRawSubtitle,
-  formatCuesWithTimestamps,
-  limitPreviewText,
-} from "../subtitle/preview";
-import { localFileProvider } from "../providers/local-provider";
-import { computeChecksum, uuid } from "../utils/hash";
-import { logger } from "../utils/logger";
-import type { SubtitleSearchResult } from "../providers/provider";
-import type { SubtitleCue } from "../subtitle/subtitle-model";
-import type { SubtitleRecord } from "../storage/database";
+import {m115VideoAdapter} from "../player/m115-video-adapter";
+import {PlayerController} from "../player/player-controller";
+import {SubtitlePanel} from "../ui/panel";
+import {type GlobalSettings, settingsService} from "../settings/settings-service";
+import {subtitleRepository} from "../storage/subtitle-repository";
+import {subtitleSearchEngine} from "../search/search-engine";
+import type {SearchProgress} from "../search/provider-manager";
+import {providerManager} from "../search/provider-manager";
+import {detectFormat, PARSER_VERSION, parseSubtitle} from "../subtitle/parsers";
+import {decodeRawSubtitle, formatCuesWithTimestamps, limitPreviewText,} from "../subtitle/preview";
+import {localFileProvider} from "../providers/local-provider";
+import {computeChecksum, uuid} from "../utils/hash";
+import {logger} from "../utils/logger";
+import type {SubtitleSearchResult} from "../providers/provider";
+import type {SubtitleCue} from "../subtitle/subtitle-model";
+import type {SubtitleRecord} from "../storage/database";
 import type {VideoIdentity} from "../identity/video-identity";
 import {buildSubtitleZip} from "../storage/subtitle-zip";
-import {metadataSync, fileIdFromVideoKey, type RemoteSubtitleMeta} from "../storage/metadata-sync";
+import {fileIdFromVideoKey, metadataSync, type RemoteSubtitleMeta} from "../storage/metadata-sync";
 import {autoSearchCache, buildAutoSearchCacheKey} from "../search/search-cache";
-import { isSubtitleError } from "../utils/errors";
+import {isSubtitleError} from "../utils/errors";
 
 export async function bootstrap(): Promise<void> {
-  logger.info("115 Subtitle Assistant 启动中...");
+  logger.info("115 AutoSubtitle 启动中...");
 
   const settings = await settingsService.load();
   logger.setEnabled(settings.debug);

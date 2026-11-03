@@ -167,7 +167,7 @@ flowchart TD
 
 ```javascript
 // ==UserScript==
-// @name         115 Subtitle Assistant
+// @name         115 AutoSubtitle
 // @namespace    https://example.invalid/115-subtitle-assistant
 // @version      0.3.0
 // @description  115 网页播放器字幕搜索、显示与本地缓存
@@ -909,7 +909,7 @@ Overlay 必须：
 
 ### 12.2 数据库
 
-数据库名：`115SubtitleAssistantDB`。当前版本 `2`。
+数据库名：`115AutoSubtitleDB`。当前版本 `2`。
 
 建议 Store：
 

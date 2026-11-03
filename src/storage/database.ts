@@ -1,5 +1,4 @@
-import type { SubtitleFormat } from "../subtitle/subtitle-model";
-import type { SubtitleCue } from "../subtitle/subtitle-model";
+import type {SubtitleCue, SubtitleFormat} from "../subtitle/subtitle-model";
 import type {SubtitleSearchResult} from "../providers/provider";
 
 export interface SubtitleRecord {
@@ -92,7 +91,7 @@ export interface SettingsEntry {
   updatedAt: number;
 }
 
-export const DB_NAME = "115SubtitleAssistantDB";
+export const DB_NAME = "115AutoSubtitleDB";
 export const DB_VERSION = 2;
 
 export interface IDBCollections {

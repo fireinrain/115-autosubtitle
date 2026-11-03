@@ -1,6 +1,6 @@
 {
   "name": "115-autosubtitle",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "115 网页播放器字幕搜索、显示与本地缓存（Tampermonkey Userscript）",
   "type": "module",
   "scripts": {

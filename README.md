@@ -158,6 +158,10 @@ src/
 
 ---
 
+## 感谢
+
+如果本脚本对您有帮助，欢迎在 GitHub 上给项目点赞/Star 或提交 Pull Request 。
+
 ## License
 
 MIT

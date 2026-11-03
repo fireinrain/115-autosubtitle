@@ -1,4 +1,5 @@
 import type { SubtitleFormat } from "../subtitle/subtitle-model";
+import {DEFAULT_SUBTITLE_FONT} from "./font-presets";
 import { readStoredValue, writeStoredValue } from "../storage/gm-storage";
 
 export interface SubtitleStyleSettings {
@@ -37,6 +38,8 @@ export interface ShortcutSettings {
 }
 
 export interface GlobalSettings {
+    /** 设置结构版本，用于区分「旧默认值」与用户显式选择。 */
+    settingsVersion: number;
   enabled: boolean;
   autoSearch: boolean;
   autoLoadCachedSubtitle: boolean;
@@ -51,15 +54,19 @@ export interface GlobalSettings {
   debug: boolean;
 }
 
+export const SETTINGS_VERSION = 2;
+
 export const DEFAULT_SETTINGS: GlobalSettings = {
+    settingsVersion: SETTINGS_VERSION,
   enabled: true,
-  autoSearch: false,
+    // 先恢复缓存；没有缓存时自动搜索并提示结果，但绝不自动应用第一条。
+    autoSearch: true,
   autoLoadCachedSubtitle: true,
   autoSelectHighConfidence: false,
   preferredLanguages: ["zh-CN", "zh-TW", "en"],
   defaultFormatOrder: ["srt", "vtt", "ass", "ssa"],
   style: {
-    fontFamily: "Arial, sans-serif",
+      fontFamily: DEFAULT_SUBTITLE_FONT,
     fontSize: 32,
     fontWeight: 600,
     color: "#FFFFFF",
@@ -113,10 +120,29 @@ export class SettingsService {
 
   private mergeDefaults(raw?: Partial<GlobalSettings>): GlobalSettings {
     if (!raw) return { ...DEFAULT_SETTINGS };
+      const style = {...DEFAULT_SETTINGS.style, ...raw.style};
+      // 旧版本默认是 `Arial, sans-serif`，中文会回退到系统默认字形。
+      // 仅迁移这个旧默认值，保留用户自己选过的字体。
+      if (!style.fontFamily || style.fontFamily === "Arial, sans-serif") {
+          style.fontFamily = DEFAULT_SUBTITLE_FONT;
+      }
+
+      // v1 没有自动搜索开关，存下来的 false 只可能是旧默认值，不是用户选择。
+      // 升级到 v2 时把这类配置迁移为开启，之后用户手动关闭会带 settingsVersion=2，
+      // 不会被再次改写。
+      const storedVersion =
+          typeof raw.settingsVersion === "number" ? raw.settingsVersion : 1;
+      const autoSearch =
+          storedVersion < 2 && raw.autoSearch === false
+              ? DEFAULT_SETTINGS.autoSearch
+              : raw.autoSearch ?? DEFAULT_SETTINGS.autoSearch;
+
     return {
       ...DEFAULT_SETTINGS,
       ...raw,
-      style: { ...DEFAULT_SETTINGS.style, ...raw.style },
+        settingsVersion: SETTINGS_VERSION,
+        autoSearch,
+        style,
       sync: { ...DEFAULT_SETTINGS.sync, ...raw.sync },
       cache: { ...DEFAULT_SETTINGS.cache, ...raw.cache },
       shortcuts: { ...DEFAULT_SETTINGS.shortcuts, ...raw.shortcuts },

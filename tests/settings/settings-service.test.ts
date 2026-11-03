@@ -10,6 +10,12 @@ describe("DEFAULT_SETTINGS", () => {
     expect(DEFAULT_SETTINGS.sync.offsetMs).toBe(0);
     expect(DEFAULT_SETTINGS.cache.maxBytes).toBeGreaterThan(0);
   });
+
+    it("默认开启无缓存自动搜索，但不自动应用结果", () => {
+        expect(DEFAULT_SETTINGS.autoSearch).toBe(true);
+        expect(DEFAULT_SETTINGS.autoLoadCachedSubtitle).toBe(true);
+        expect(DEFAULT_SETTINGS.autoSelectHighConfidence).toBe(false);
+    });
 });
 
 describe("SettingsService", () => {
@@ -55,6 +61,46 @@ describe("SettingsService", () => {
     const loaded = await s2.load();
     expect(loaded.debug).toBe(true);
   });
+
+    it("旧默认字体 Arial 迁移为中文字幕字体", async () => {
+        const store = (globalThis as any).__gmStore as Map<string, unknown>;
+        store.set("115-subtitle-assistant-settings", {style: {fontFamily: "Arial, sans-serif"}});
+
+        const service = new SettingsService();
+        const loaded = await service.load();
+        expect(loaded.style.fontFamily).toContain("PingFang SC");
+    });
+
+    it("保留用户自定义字体", async () => {
+        const store = (globalThis as any).__gmStore as Map<string, unknown>;
+        store.set("115-subtitle-assistant-settings", {style: {fontFamily: '"Custom Font", serif'}});
+
+        const service = new SettingsService();
+        const loaded = await service.load();
+        expect(loaded.style.fontFamily).toBe('"Custom Font", serif');
+    });
+
+    it("旧版本没有 autoSearch 开关时，false 视为旧默认值并迁移为开启", async () => {
+        const store = (globalThis as any).__gmStore as Map<string, unknown>;
+        store.set("115-subtitle-assistant-settings", {autoSearch: false, enabled: true});
+
+        const service = new SettingsService();
+        const loaded = await service.load();
+        expect(loaded.autoSearch).toBe(true);
+        expect(loaded.settingsVersion).toBeGreaterThan(1);
+    });
+
+    it("v2 配置里用户显式关闭 autoSearch 时保持不变", async () => {
+        const store = (globalThis as any).__gmStore as Map<string, unknown>;
+        store.set("115-subtitle-assistant-settings", {
+            settingsVersion: 2,
+            autoSearch: false,
+        });
+
+        const service = new SettingsService();
+        const loaded = await service.load();
+        expect(loaded.autoSearch).toBe(false);
+    });
 
   it("缓存避免重复读取", async () => {
     const service = new SettingsService();

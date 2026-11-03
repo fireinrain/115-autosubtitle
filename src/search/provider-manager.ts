@@ -4,7 +4,7 @@ import { xunleiProvider } from "../providers/xunlei-provider";
 import { subtitleCatProvider } from "../providers/subtitlecat-provider";
 import type { GlobalSettings } from "../settings/settings-service";
 import { logger } from "../utils/logger";
-import { SubtitleError } from "../utils/errors";
+import {SubtitleError, type SubtitleErrorCode} from "../utils/errors";
 
 export type ProviderStatus = "pending" | "searching" | "success" | "no-results" | "error" | "timeout";
 
@@ -12,6 +12,8 @@ export interface ProviderState {
   providerId: string;
   status: ProviderStatus;
   errorMessage?: string;
+    /** 失败原因的错误码，用于区分「来源没结果」和「当前环境根本发不出请求」。 */
+    errorCode?: SubtitleErrorCode;
   resultCount: number;
 }
 

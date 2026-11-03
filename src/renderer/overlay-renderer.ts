@@ -1,5 +1,6 @@
 import type { SubtitleCue } from "../subtitle/subtitle-model";
 import type { SubtitleStyleSettings } from "../settings/settings-service";
+import {normalizeFontFamily} from "../settings/font-presets";
 import { logger } from "../utils/logger";
 
 export class OverlayRenderer {
@@ -87,14 +88,17 @@ export class OverlayRenderer {
         pointer-events: none;
       }
       .subtitle-line {
-        font-family: ${s.fontFamily};
+        /* 字幕用中文字幕字体栈，避免中文回退到西文字体后字形发虚、字重不统一。 */
+        font-family: ${normalizeFontFamily(s.fontFamily)};
         font-size: ${s.fontSize}px;
         font-weight: ${s.fontWeight};
         color: ${s.color};
         line-height: ${s.lineHeight};
+        letter-spacing: 0.02em;
         white-space: pre-wrap;
-        text-shadow: ${s.shadow ? `2px 2px 4px rgba(0,0,0,0.8)` : "none"};
+        text-shadow: ${s.shadow ? `0 2px 4px rgba(0,0,0,0.85), 0 0 8px rgba(0,0,0,0.55)` : "none"};
         -webkit-text-stroke: ${s.outlineWidth}px ${s.outlineColor};
+        paint-order: stroke fill;
         background-color: ${s.backgroundOpacity > 0 ? hexToRgba(s.backgroundColor, s.backgroundOpacity / 100) : "transparent"};
         padding: ${s.backgroundOpacity > 0 ? "4px 8px" : "0"};
         border-radius: 4px;

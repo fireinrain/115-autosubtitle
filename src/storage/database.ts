@@ -1,5 +1,6 @@
 import type { SubtitleFormat } from "../subtitle/subtitle-model";
 import type { SubtitleCue } from "../subtitle/subtitle-model";
+import type {SubtitleSearchResult} from "../providers/provider";
 
 export interface SubtitleRecord {
   id: string;
@@ -19,6 +20,12 @@ export interface SubtitleRecord {
   lastUsedAt: number;
   parserVersion: number;
   isFavorite: boolean;
+    /**
+     * 在线来源的搜索结果快照（含下载地址）。
+     * 用于跨播放域名恢复缓存：IndexedDB 按 origin 隔离，但 GM 存储共享，
+     * 另一个域名可以凭这份元数据重新下载同一条字幕。
+     */
+    sourceResult?: SubtitleSearchResult;
 }
 
 export interface VideoRecord {

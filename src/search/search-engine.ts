@@ -65,6 +65,7 @@ export class SubtitleSearchEngine {
         } else {
           providerStates[provider.id].status = "error";
           providerStates[provider.id].errorMessage = e instanceof Error ? e.message : "未知错误";
+            if (isSubtitleError(e)) providerStates[provider.id].errorCode = e.code;
           logger.warn(`Provider ${provider.id} 搜索失败`, e);
         }
       }

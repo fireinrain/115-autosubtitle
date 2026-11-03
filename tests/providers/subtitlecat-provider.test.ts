@@ -152,6 +152,24 @@ describe("SubtitleCatProvider", () => {
     expect(download.checksum).toBeDefined();
   });
 
+  it("标题不带扩展名时使用下载地址中的文件名", async () => {
+    const bytes = new TextEncoder().encode("1\n00:00:01,000 --> 00:00:02,000\nHello").buffer;
+    mockRequest.mockResolvedValueOnce({body: bytes});
+
+    const p = new SubtitleCatProvider();
+    const result = {
+      providerId: "subtitlecat",
+      sourceId: "subs/1725.html",
+      title: "DVAJ-758.zh-cn(by transub)",
+      format: "srt" as const,
+      downloadUrl:
+          "https://www.subtitlecat.com/subs/1725/DVAJ-758.zh-cn(by%20transub)-zh-CN.srt",
+    };
+
+    const download = await p.download(result);
+    expect(download.fileName).toBe("DVAJ-758.zh-cn(by transub)-zh-CN.srt");
+  });
+
   it("download 拒绝非 subtitlecat 域名", async () => {
     const p = new SubtitleCatProvider();
     const result = {

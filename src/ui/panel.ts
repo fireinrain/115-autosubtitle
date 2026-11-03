@@ -2,7 +2,14 @@ import type { VideoIdentity } from "../identity/video-identity";
 import type { SubtitleSearchResult } from "../providers/provider";
 import { providerManager, type ProviderState, type SearchProgress } from "../search/provider-manager";
 import type { GlobalSettings, SubtitleStyleSettings } from "../settings/settings-service";
+import {FONT_PRESETS, findFontPreset, normalizeFontFamily} from "../settings/font-presets";
 import type { SubtitleRecord } from "../storage/database";
+import type {RemoteCacheSummary, RemoteSubtitleMeta} from "../storage/metadata-sync";
+import {
+  decodeRawSubtitle,
+  formatCuesWithTimestamps,
+  limitPreviewText,
+} from "../subtitle/preview";
 
 export interface PanelCallbacks {
   onImportFile: (file: File) => void;
@@ -11,11 +18,15 @@ export interface PanelCallbacks {
   onPreviewResult: (result: SubtitleSearchResult) => void;
   onDownloadResult: (result: SubtitleSearchResult) => void;
   onSelectCachedSubtitle: (record: SubtitleRecord) => void;
+  onRestoreRemote: (meta: RemoteSubtitleMeta) => void;
   onStyleChange: (style: Partial<SubtitleStyleSettings>) => void;
   onOffsetChange: (offsetMs: number) => void;
   onToggleSubtitle: (enabled: boolean) => void;
+  onAutoSearchChange: (enabled: boolean) => void;
   onClearCache: () => void;
   onDeleteSubtitle: (id: string) => void;
+  onDeduplicateCache: () => void;
+  onExportAll: () => void;
 }
 
 type PanelTab = "subs" | "style" | "sync" | "cache";
@@ -37,6 +48,7 @@ const PANEL_CSS = `
     border: 1px solid #45475a; border-radius: 10px;
     box-shadow: 0 12px 40px rgba(0,0,0,.55);
     font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color-scheme: dark;
     overflow: hidden;
   }
   .panel.open { display: flex; }
@@ -63,6 +75,7 @@ const PANEL_CSS = `
   .field-label { min-width: 62px; font-size: 12px; color: #a6adc8; }
   .input { flex: 1; min-width: 0; padding: 6px 10px; background: #313244; border: 1px solid #45475a; border-radius: 6px; color: #cdd6f4; font-size: 13px; }
   .input:focus { outline: none; border-color: #89b4fa; }
+  select.input { cursor: pointer; }
   .btn { padding: 6px 12px; background: #89b4fa; color: #1e1e2e; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; white-space: nowrap; }
   .btn:hover { background: #74c7ec; }
   .btn:disabled { opacity: .5; cursor: default; }
@@ -74,14 +87,16 @@ const PANEL_CSS = `
   .result { padding: 9px 10px; background: #313244; border: 1px solid transparent; border-radius: 6px; margin-bottom: 6px; }
   .result.active { border-color: #a6e3a1; background: rgba(166,227,161,.10); box-shadow: inset 3px 0 0 #a6e3a1; }
   .result.active .result-title { color: #a6e3a1; }
-  .badge-active { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: #a6e3a1; color: #1e1e2e; font-size: 10px; font-weight: 600; vertical-align: 1px; }
+  .result-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .result-title-wrap { display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 50%; }
+  .badge-active { display: inline-block; flex-shrink: 0; padding: 1px 7px; border-radius: 999px; background: #a6e3a1; color: #1e1e2e; font-size: 10px; font-weight: 600; vertical-align: 1px; }
   .btn-active { background: rgba(166,227,161,.18) !important; color: #a6e3a1 !important; border: 1px solid #a6e3a1 !important; opacity: 1 !important; cursor: default; }
   .toast { position: fixed; left: 50%; bottom: 96px; transform: translate(-50%, 8px); z-index: 2147483001; max-width: 380px; padding: 9px 14px; border-radius: 8px; background: rgba(166,227,161,.97); color: #1e1e2e; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; box-shadow: 0 8px 24px rgba(0,0,0,.45); opacity: 0; transition: opacity .16s ease, transform .16s ease; pointer-events: none; word-break: break-all; }
   .toast.show { opacity: 1; transform: translate(-50%, 0); }
   .toast.warn { background: rgba(249,226,175,.97); }
-  .result-title { font-size: 12px; font-weight: 500; margin-bottom: 2px; word-break: break-all; }
-  .result-meta { font-size: 11px; color: #a6adc8; }
-  .result-actions { display: flex; gap: 6px; margin-top: 7px; }
+  .result-title { min-width: 0; font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .result-meta { font-size: 11px; color: #a6adc8; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .result-actions { display: flex; gap: 6px; margin-left: auto; flex-shrink: 0; }
   .empty { padding: 14px 10px; text-align: center; font-size: 12px; color: #6c7086; background: #181825; border-radius: 6px; }
   .chip { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; margin-right: 4px; }
   .chip-success { background: rgba(166,227,161,.16); color: #a6e3a1; }
@@ -94,6 +109,9 @@ const PANEL_CSS = `
   .modal-body { flex: 1; overflow-y: auto; padding: 12px 14px; }
   .preview-line { padding: 3px 0; border-bottom: 1px solid #313244; font-size: 12px; line-height: 1.6; color: #cdd6f4; }
   .preview-line:last-child { border-bottom: none; }
+  .preview-line:empty { border-bottom: none; padding: 0; height: 8px; }
+  .preview-time { color: #89b4fa; font-variant-numeric: tabular-nums; }
+  .preview-text { color: #cdd6f4; }
 `;
 
 function div(className: string, text?: string): HTMLDivElement {
@@ -132,6 +150,9 @@ export class SubtitlePanel {
   private currentSubtitle: string | null = null;
   private currentSubtitleId: string | null = null;
   private cachedSubtitles: SubtitleRecord[] = [];
+  private remoteSubtitles: RemoteSubtitleMeta[] = [];
+  private remoteSummary: RemoteCacheSummary = {count: 0, bytes: 0, origins: []};
+  private cacheSummary = {count: 0, bytes: 0};
   private settings: GlobalSettings | null = null;
   private codeDraft: string | null = null;
   private toastEl: HTMLElement | null = null;
@@ -139,8 +160,10 @@ export class SubtitlePanel {
 
   private playerRoot: HTMLElement | null = null;
   private playerBarObserver: MutationObserver | null = null;
-  private nativeToggle: { li: HTMLLIElement; anchor: HTMLAnchorElement; tooltip: HTMLElement } | null = null;
+  private nativeToggle: { container: HTMLElement; anchor: HTMLElement } | null = null;
   private subtitleVisible = true;
+  /** 控制栏自动隐藏时锚点 rect 会退化为 0，用最近一次有效位置兜底。 */
+  private lastAnchorRect: { right: number; top: number; bottom: number } | null = null;
 
   constructor(callbacks: PanelCallbacks) {
     this.callbacks = callbacks;
@@ -184,6 +207,24 @@ export class SubtitlePanel {
   setCachedSubtitles(subtitles: SubtitleRecord[]): void {
     this.cachedSubtitles = subtitles;
     this.renderBody();
+  }
+
+  setRemoteSubtitles(subtitles: RemoteSubtitleMeta[]): void {
+    this.remoteSubtitles = subtitles;
+    this.renderBody();
+  }
+
+  setRemoteSummary(summary: RemoteCacheSummary): void {
+    this.remoteSummary = summary;
+    if (this.visible && this.activeTab === "cache") this.renderBody();
+  }
+
+  setCacheSummary(summary: { count: number; bytes: number }): void {
+    const changed =
+        this.cacheSummary.count !== summary.count || this.cacheSummary.bytes !== summary.bytes;
+    this.cacheSummary = summary;
+    // 缓存数量和列表通常一起更新；这里只在摘要真的变化时重绘，避免重复重建 DOM。
+    if (changed && this.visible && this.activeTab === "cache") this.renderBody();
   }
 
   /**
@@ -230,8 +271,9 @@ export class SubtitlePanel {
     const body = div("modal-body");
     const lines = content.split("\n");
     for (const line of lines) {
-      const lineEl = div("preview-line", line);
-      body.appendChild(lineEl);
+      // 时间轴行（`1. 00:00:00,000 --> 00:00:10,000`）单独着色，方便快速定位。
+      const className = line.includes("-->") ? "preview-line preview-time" : "preview-line preview-text";
+      body.appendChild(div(className, line));
     }
 
     modal.appendChild(header);
@@ -250,9 +292,13 @@ export class SubtitlePanel {
    * 把助手开关插入 115 原生播放器底栏。
    *
    * 实测依据：docs/115-player-inspection.md
-   * 原生字幕按钮位于 #js-video_box .operate-bar .bar-side > ul 的第 4 个 li，
-   * 结构为 <li><a class="btn-cle"><s>字幕</s></a><div class="tooltip">字幕设置</div></li>。
-   * 这里插到它后面，并观察播放器根节点，防止 SPA 重绘后按钮丢失。
+   * - 旧播放页（115vod.com）：原生字幕按钮位于
+   *   `#js-video_box .operate-bar .bar-side > ul` 的第 4 个 `li`，
+   *   结构为 `<li><a class="btn-cle"><s>字幕</s></a><div class="tooltip">…</div></li>`。
+   * - 新播放页（115.com/players/video/*）：控制栏里是
+   *   `<div class="relative"><button>字幕</button></div>`，按钮没有 id/class 语义，
+   *   只能按文本与结构定位。
+   * 这里把 CC 插到原生字幕控件后面，并观察播放器根节点，防止 SPA 重绘后按钮丢失。
    */
   mountPlayerControls(playerRoot: HTMLElement): void {
     if (this.playerRoot === playerRoot) {
@@ -272,58 +318,97 @@ export class SubtitlePanel {
     if (this.visible && this.activeTab === "subs") this.renderBody();
   }
 
-  private findNativeSubtitleItem(root: HTMLElement): HTMLLIElement | null {
+  private findNativeSubtitleControl(
+      root: HTMLElement,
+  ): { container: HTMLElement; button: HTMLElement; mode: "legacy" | "modern" } | null {
+    // 旧播放器：li > a.btn-cle > s:字幕
     const items = root.querySelectorAll<HTMLLIElement>(".operate-bar .bar-side > ul > li");
     for (const li of items) {
       const anchor = li.firstElementChild;
       if (!(anchor instanceof HTMLAnchorElement)) continue;
       if (!anchor.classList.contains("btn-cle")) continue;
-      if (anchor.textContent?.trim() === "字幕") return li;
+      if (anchor.textContent?.trim() !== "字幕") continue;
+      return {container: li, button: anchor, mode: "legacy"};
     }
+
+    // 新播放器：控制栏里的 <button>字幕</button>，外层是 <div class="relative">。
+    // 按钮类名是构建时生成的 utility class，不能作为长期选择器，只按文本定位。
+    const buttons = root.querySelectorAll<HTMLButtonElement>("button");
+    for (const button of buttons) {
+      if (button.closest('[data-userscript="subtitle-toggle"]')) continue;
+      if (button.textContent?.trim() !== "字幕") continue;
+      const container = button.parentElement;
+      if (!container) continue;
+      if (button.getBoundingClientRect().width <= 0) continue;
+      return {container, button, mode: "modern"};
+    }
+
     return null;
   }
 
   private ensureNativeToggle(): void {
     if (!this.playerRoot) return;
-    const nativeItem = this.findNativeSubtitleItem(this.playerRoot);
+    const native = this.findNativeSubtitleControl(this.playerRoot);
+    if (!native) return;
 
     if (
-      !nativeItem ||
-      (this.nativeToggle &&
-        this.nativeToggle.li.isConnected &&
-        this.nativeToggle.li.previousElementSibling === nativeItem)
+        this.nativeToggle &&
+        this.nativeToggle.container.isConnected &&
+        this.nativeToggle.container.previousElementSibling === native.container
     ) {
       return;
     }
 
-    this.nativeToggle?.li.remove();
+    this.nativeToggle?.container.remove();
     this.nativeToggle = null;
-    if (!nativeItem) return;
 
-    const li = document.createElement("li");
-    li.className = "userscript-subtitle-toggle";
-    li.dataset.userscript = "subtitle-toggle";
+    if (native.mode === "legacy") {
+      const li = document.createElement("li");
+      li.className = "userscript-subtitle-toggle";
+      li.dataset.userscript = "subtitle-toggle";
 
-    const anchor = document.createElement("a");
-    anchor.href = "javascript:;";
-    anchor.className = "btn-cle";
-    anchor.setAttribute("role", "button");
-    anchor.setAttribute("aria-label", "打开字幕助手列表");
-    anchor.title = "字幕助手";
+      const anchor = document.createElement("a");
+      anchor.href = "javascript:;";
+      anchor.className = "btn-cle";
+      anchor.setAttribute("role", "button");
+      anchor.setAttribute("aria-label", "打开字幕助手列表");
+      anchor.title = "字幕助手";
 
-    const label = document.createElement("s");
-    label.textContent = "CC";
-    anchor.appendChild(label);
+      const label = document.createElement("s");
+      label.textContent = "CC";
+      anchor.appendChild(label);
 
-    const tooltip = div("tooltip");
-    tooltip.textContent = "字幕助手";
+      const tooltip = div("tooltip");
+      tooltip.textContent = "字幕助手";
 
-    li.appendChild(anchor);
-    li.appendChild(tooltip);
-    anchor.addEventListener("click", this.handleNativeToggleClick);
-    nativeItem.after(li);
+      li.appendChild(anchor);
+      li.appendChild(tooltip);
+      anchor.addEventListener("click", this.handleNativeToggleClick);
+      native.container.after(li);
 
-    this.nativeToggle = { li, anchor, tooltip };
+      this.nativeToggle = {container: li, anchor};
+      return;
+    }
+
+    const wrapper = document.createElement("div");
+    wrapper.className = native.container.className || "relative";
+    wrapper.dataset.userscript = "subtitle-toggle";
+
+    const button = document.createElement("button");
+    button.type = "button";
+    // 与新版控制栏「倍速」等按钮保持一致；「字幕」的 text-blue-400 表示开启态，
+    // 这里使用普通的白色/悬停蓝色。
+    button.className = "p-1 text-sm whitespace-nowrap transition-colors text-white hover:text-blue-400";
+    button.dataset.userscript = "subtitle-toggle";
+    button.setAttribute("role", "button");
+    button.setAttribute("aria-label", "打开字幕助手列表");
+    button.title = "字幕助手";
+    button.textContent = "CC";
+    button.addEventListener("click", this.handleNativeToggleClick);
+
+    wrapper.appendChild(button);
+    native.container.after(wrapper);
+    this.nativeToggle = {container: wrapper, anchor: button};
   }
 
   private handleNativeToggleClick = (event: Event): void => {
@@ -340,7 +425,7 @@ export class SubtitlePanel {
     if (!this.visible) return;
     const path = event.composedPath();
     if (this.container && path.includes(this.container)) return;
-    if (this.nativeToggle && path.includes(this.nativeToggle.li)) return;
+    if (this.nativeToggle && path.includes(this.nativeToggle.container)) return;
     this.hide();
   };
 
@@ -438,6 +523,9 @@ export class SubtitlePanel {
         this.bodyEl.appendChild(this.renderCacheTab());
         break;
     }
+
+    // 内容高度变化会影响上弹位置，重算一次锚点，避免面板超出视口。
+    if (this.visible) this.positionPanel();
   }
 
   private renderSubsTab(): HTMLElement {
@@ -492,6 +580,23 @@ export class SubtitlePanel {
     searchRow.appendChild(searchBtn);
     searchSection.appendChild(searchRow);
 
+    const autoRow = div("row");
+    autoRow.appendChild(div("field-label", "无缓存自动搜"));
+    const autoOn = this.settings?.autoSearch ?? true;
+    const autoBtn = btn("btn btn-ghost btn-sm", autoOn ? "已开启" : "已关闭", () => {
+      const next = !(this.settings?.autoSearch ?? true);
+      autoBtn.textContent = next ? "已开启" : "已关闭";
+      this.callbacks.onAutoSearchChange(next);
+    });
+    autoBtn.title = "先恢复该视频的缓存；没有缓存时才自动搜索，但不会自动使用搜索结果";
+    const autoHint = div("value", "仅搜索，不自动使用");
+    autoHint.style.minWidth = "0";
+    autoHint.style.flex = "1";
+    autoHint.style.textAlign = "left";
+    autoRow.appendChild(autoBtn);
+    autoRow.appendChild(autoHint);
+    searchSection.appendChild(autoRow);
+
     const actionRow = div("row");
     const importBtn = btn("btn btn-ghost", "导入本地字幕", () => fileInput.click());
     const fileInput = document.createElement("input");
@@ -545,6 +650,9 @@ export class SubtitlePanel {
       this.progress.done &&
       states.length > 0 &&
       states.every((s) => s.status === "error" || s.status === "timeout");
+    // 全部失败且都是「环境发不出请求」时，普通用户看到的「搜索失败」没有可操作性。
+    const networkUnavailable =
+        allFailed && states.every((s) => s.errorCode === "NETWORK_UNAVAILABLE");
 
     if (this.progress.results.length === 0) {
       const message = !this.progress.done
@@ -555,6 +663,16 @@ export class SubtitlePanel {
       const empty = div("empty", message);
       empty.style.marginTop = "8px";
       section.appendChild(empty);
+      if (networkUnavailable) {
+        const hint = div(
+            "empty",
+            "当前环境无法发起跨域请求（缺少 GM_xmlhttpRequest），通常是开发模式加载器导致。请安装构建产物 dist/115-subtitle-assistant.user.js 后重试。",
+        );
+        hint.style.marginTop = "4px";
+        hint.style.fontSize = "11px";
+        hint.style.lineHeight = "1.5";
+        section.appendChild(hint);
+      }
       return section;
     }
 
@@ -583,34 +701,82 @@ export class SubtitlePanel {
   }
 
   private renderCachedList(): HTMLElement | null {
-    if (this.cachedSubtitles.length === 0) return null;
+    if (this.cachedSubtitles.length === 0 && this.remoteSubtitles.length === 0) return null;
 
     const section = div("section");
-    section.appendChild(div("section-title", `已缓存（${this.cachedSubtitles.length}）`));
 
-    for (const sub of this.cachedSubtitles) {
-      const meta = `${sub.format.toUpperCase()} · ${sub.cueCount} 条 · ${formatSize(sub.rawBlob.size)} · ${providerManager.get(sub.providerId)?.name ?? sub.providerId}`;
+    if (this.cachedSubtitles.length > 0) {
+      section.appendChild(div("section-title", `已缓存（${this.cachedSubtitles.length}）`));
+      for (const sub of this.cachedSubtitles) {
+        const meta = `${sub.format.toUpperCase()} · ${sub.cueCount} 条 · ${formatSize(sub.rawBlob.size)} · ${providerManager.get(sub.providerId)?.name ?? sub.providerId}`;
+        section.appendChild(
+            this.createSubtitleRow({
+              title: sub.title,
+              meta,
+              active: sub.id === this.currentSubtitleId,
+              actions: [
+                {label: "使用", primary: true, onClick: () => this.callbacks.onSelectCachedSubtitle(sub)},
+                {
+                  label: "查看", onClick: () => {
+                    void this.previewCached(sub);
+                  }
+                },
+                {label: "删除", danger: true, onClick: () => this.callbacks.onDeleteSubtitle(sub.id)},
+              ],
+            }),
+        );
+      }
+    }
+
+    if (this.remoteSubtitles.length > 0) {
+      section.appendChild(div("section-title", `其他播放域名缓存（${this.remoteSubtitles.length}）`));
       section.appendChild(
-        this.createSubtitleRow({
-          title: sub.title,
-          meta,
-          active: sub.id === this.currentSubtitleId,
-          actions: [
-            { label: "使用", primary: true, onClick: () => this.callbacks.onSelectCachedSubtitle(sub) },
-            { label: "查看", onClick: () => this.previewCached(sub) },
-            { label: "删除", danger: true, onClick: () => this.callbacks.onDeleteSubtitle(sub.id) },
-          ],
-        }),
+          div("info", "来自其他 115 播放域名的索引；恢复时会重新下载字幕文件，不会复制本地 Blob。"),
       );
+      for (const sub of this.remoteSubtitles) {
+        const provider = providerManager.get(sub.providerId);
+        const providerEnabled = this.settings?.providers[sub.providerId]?.enabled ?? true;
+        const restorable = Boolean(sub.sourceResult && provider && providerEnabled);
+        const providerName = provider?.name ?? sub.providerId;
+        const meta = `${providerName} · ${sub.format.toUpperCase()} · ${sub.cueCount} 条 · ${formatSize(sub.size)} · ${sub.origin}`;
+        section.appendChild(
+            this.createSubtitleRow({
+              title: sub.title,
+              meta,
+              actions: restorable
+                  ? [{label: "恢复", primary: true, onClick: () => this.callbacks.onRestoreRemote(sub)}]
+                  : [
+                    {
+                      label: "说明",
+                      onClick: () =>
+                          this.showToast(
+                              !sub.sourceResult
+                                  ? "这条字幕来自本地导入，无法在另一播放域名自动恢复；请在原域名使用或重新导入文件。"
+                                  : "这条字幕的来源已禁用或不可用，启用对应字幕来源后才能恢复。",
+                              "warn",
+                          ),
+                    },
+                  ],
+            }),
+        );
+      }
     }
 
     return section;
   }
 
-  private previewCached(record: SubtitleRecord): void {
-    const lines = record.cues.slice(0, 60).map((cue, i) => `${i + 1}. ${cue.text}`);
-    const content = lines.length > 0 ? lines.join("\n") : "（无字幕内容）";
-    this.showPreview(record.title, content);
+  private async previewCached(record: SubtitleRecord): Promise<void> {
+    // 预览用解析后的 Cue 重建：序号与时间轴合并在一行，字幕正文另起一行。
+    // 只有解析结果为空时才回退到原始文件文本，避免出现空白弹层。
+    let content = formatCuesWithTimestamps(record.cues);
+    if (!content.trim()) {
+      try {
+        content = decodeRawSubtitle(await record.rawBlob.arrayBuffer(), record.encoding);
+      } catch {
+        content = "";
+      }
+    }
+    this.showPreview(record.title, limitPreviewText(content.trim() ? content : "（无字幕内容）"));
   }
 
   private renderStyleTab(): HTMLElement {
@@ -625,6 +791,7 @@ export class SubtitlePanel {
     const section = div("section");
     section.appendChild(div("section-title", "字幕样式"));
 
+    section.appendChild(this.fontRow(normalizeFontFamily(style.fontFamily)));
     section.appendChild(this.sliderRow("字号", style.fontSize, 16, 72, 1, (v) => ({ fontSize: v })));
     section.appendChild(this.sliderRow("描边", style.outlineWidth, 0, 6, 1, (v) => ({ outlineWidth: v })));
     section.appendChild(this.sliderRow("垂直位置", style.yPercent, 20, 98, 1, (v) => ({ yPercent: v })));
@@ -704,31 +871,104 @@ export class SubtitlePanel {
     const section = div("section");
     section.appendChild(div("section-title", "缓存管理"));
 
-    const bytes = this.cachedSubtitles.reduce((sum, s) => sum + s.rawBlob.size, 0);
-    section.appendChild(div("info", `当前视频已缓存 ${this.cachedSubtitles.length} 条字幕，共 ${formatSize(bytes)}`));
-
-    for (const sub of this.cachedSubtitles) {
+    const total = this.cacheSummary;
+    const currentCount = this.cachedSubtitles.length;
+    const remoteText =
+        this.remoteSummary.count > 0
+            ? `；其他播放域名 ${this.remoteSummary.count} 条 / ${formatSize(this.remoteSummary.bytes)}`
+            : "";
+    const summaryText =
+        (total.count === currentCount
+            ? `本地缓存共 ${total.count} 条字幕，共 ${formatSize(total.bytes)}`
+            : `本地缓存共 ${total.count} 条字幕，共 ${formatSize(total.bytes)}；当前视频 ${currentCount} 条`) +
+        remoteText;
+    section.appendChild(div("info", summaryText));
+    if (this.remoteSummary.count > 0) {
       section.appendChild(
-        this.createSubtitleRow({
-          title: sub.title,
-          meta: `${sub.format.toUpperCase()} · ${sub.cueCount} 条 · ${formatSize(sub.rawBlob.size)}`,
-          active: sub.id === this.currentSubtitleId,
-          actions: [
-            { label: "使用", primary: true, onClick: () => this.callbacks.onSelectCachedSubtitle(sub) },
-            { label: "删除", danger: true, onClick: () => this.callbacks.onDeleteSubtitle(sub.id) },
-          ],
-        }),
+          div("info", `已通过 GM 同步索引：${this.remoteSummary.origins.join("、")}`),
       );
     }
+
+    if (currentCount > 0) {
+      section.appendChild(div("section-title", "当前视频字幕"));
+      for (const sub of this.cachedSubtitles) {
+        section.appendChild(
+            this.createSubtitleRow({
+              title: sub.title,
+              meta: `${sub.format.toUpperCase()} · ${sub.cueCount} 条 · ${formatSize(sub.rawBlob.size)}`,
+              active: sub.id === this.currentSubtitleId,
+              actions: [
+                {label: "使用", primary: true, onClick: () => this.callbacks.onSelectCachedSubtitle(sub)},
+                {label: "删除", danger: true, onClick: () => this.callbacks.onDeleteSubtitle(sub.id)},
+              ],
+            }),
+        );
+      }
+    } else {
+      section.appendChild(div("empty", "当前视频还没有缓存字幕"));
+    }
+
+    const dedupeRow = div("row");
+    dedupeRow.appendChild(btn("btn btn-ghost btn-sm", "缓存字幕去重", () => {
+      if (
+          confirm(
+              "将按番号合并缓存：同一番号只保留最新的一份字幕，较旧的记录会被删除。\n该操作不可撤销，确定继续？",
+          )
+      ) {
+        this.callbacks.onDeduplicateCache();
+      }
+    }));
+    const dedupeHint = div("value", "同一番号只保留最新");
+    dedupeHint.style.minWidth = "0";
+    dedupeHint.style.flex = "1";
+    dedupeHint.style.textAlign = "left";
+    dedupeRow.appendChild(dedupeHint);
+    section.appendChild(dedupeRow);
 
     const clearRow = div("row");
     clearRow.appendChild(btn("btn btn-danger btn-sm", "清空全部缓存", () => {
       if (confirm("确定清空所有字幕缓存？该操作不可撤销。")) this.callbacks.onClearCache();
     }));
+    const exportBtn = btn("btn btn-ghost btn-sm", "导出所有字幕", () => this.callbacks.onExportAll());
+    exportBtn.disabled = total.count === 0;
+    exportBtn.title = "将所有字幕打包为 115autosubtitle.zip";
+    clearRow.appendChild(exportBtn);
     section.appendChild(clearRow);
 
     pane.appendChild(section);
     return pane;
+  }
+
+  private fontRow(current: string): HTMLElement {
+    const row = div("row");
+    row.appendChild(div("field-label", "字体"));
+
+    const select = document.createElement("select");
+    select.className = "input";
+    select.setAttribute("aria-label", "字幕字体");
+
+    for (const preset of FONT_PRESETS) {
+      const option = document.createElement("option");
+      option.value = preset.fontFamily;
+      option.textContent = preset.label;
+      select.appendChild(option);
+    }
+
+    // 旧配置里保存的可能是自定义/已下线的字体栈，保留为一项避免选择被静默改掉。
+    if (!findFontPreset(current)) {
+      const custom = document.createElement("option");
+      custom.value = current;
+      custom.textContent = `自定义（${current.split(",")[0].replace(/["']/g, "")}）`;
+      select.appendChild(custom);
+    }
+
+    select.value = current;
+    select.addEventListener("change", () => {
+      this.callbacks.onStyleChange({fontFamily: select.value});
+    });
+
+    row.appendChild(select);
+    return row;
   }
 
   private sliderRow(
@@ -811,15 +1051,19 @@ export class SubtitlePanel {
     const active = opts.active === true;
     const row = div(`result${active ? " active" : ""}`);
 
+    const head = div("result-head");
+    const titleWrap = div("result-title-wrap");
     const titleEl = div("result-title", opts.title);
+    // 超长文件名被省略后，悬停仍能看到完整名称。
+    titleEl.title = opts.title;
+    titleWrap.appendChild(titleEl);
     if (active) {
       const badge = document.createElement("span");
       badge.className = "badge-active";
       badge.textContent = "使用中";
-      titleEl.appendChild(badge);
+      titleWrap.appendChild(badge);
     }
-    row.appendChild(titleEl);
-    row.appendChild(div("result-meta", opts.meta));
+    head.appendChild(titleWrap);
 
     const actions = div("result-actions");
     for (const action of opts.actions) {
@@ -834,7 +1078,9 @@ export class SubtitlePanel {
       if (alreadyActive) button.disabled = true;
       actions.appendChild(button);
     }
-    row.appendChild(actions);
+    head.appendChild(actions);
+    row.appendChild(head);
+    row.appendChild(div("result-meta", opts.meta));
     return row;
   }
 
@@ -878,33 +1124,66 @@ export class SubtitlePanel {
     return el;
   }
 
+  /**
+   * 面板锚定在 `CC` 按钮上方。
+   *
+   * 不能只用 `bottom` 定位：115 的控制栏会自动隐藏，隐藏时按钮的
+   * `getBoundingClientRect()` 会退化（top/height 接近 0），按 `bottom` 计算会把
+   * 整个面板推到视口上方（实测 y = -429）。这里统一用 `top/left` 计算并做视口钳制，
+   * 上方放不下时改为向按钮下方展开。
+   */
   private positionPanel(): void {
     const panel = this.panelEl;
     if (!panel) return;
 
-    const width = 400;
+    const margin = 8;
+    const width = panel.offsetWidth || 400;
+    const height = panel.offsetHeight || 420;
     const anchor = this.nativeToggle?.anchor;
-    if (!anchor || !anchor.isConnected) {
-      panel.style.left = "auto";
-      panel.style.right = "16px";
-      panel.style.top = "64px";
-      panel.style.bottom = "auto";
-      return;
+    const anchorRect = anchor?.isConnected ? anchor.getBoundingClientRect() : null;
+    const hasAnchor = !!anchorRect && anchorRect.width > 0 && anchorRect.height > 0;
+
+    if (hasAnchor && anchorRect) {
+      this.lastAnchorRect = {
+        right: anchorRect.right,
+        top: anchorRect.top,
+        bottom: anchorRect.bottom,
+      };
     }
 
-    const rect = anchor.getBoundingClientRect();
-    const left = Math.min(Math.max(8, rect.right - width), window.innerWidth - width - 8);
+    // 控制栏隐藏时按钮 rect 不可用，退回最近一次有效锚点，避免面板跳到角落。
+    const usable = hasAnchor && anchorRect
+        ? {right: anchorRect.right, top: anchorRect.top, bottom: anchorRect.bottom}
+        : this.lastAnchorRect;
+
+    let left: number;
+    let top: number;
+
+    if (usable) {
+      left = usable.right - width;
+      top = usable.top - height - 10;
+      // 上方空间不足时改为向下展开。
+      if (top < margin) top = usable.bottom + 10;
+    } else {
+      left = window.innerWidth - width - 16;
+      top = window.innerHeight - height - 16;
+    }
+
+    left = Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - width - margin));
+    top = Math.min(Math.max(margin, top), Math.max(margin, window.innerHeight - height - margin));
+
     panel.style.left = `${Math.round(left)}px`;
+    panel.style.top = `${Math.round(top)}px`;
     panel.style.right = "auto";
-    panel.style.top = "auto";
-    panel.style.bottom = `${Math.round(Math.max(8, window.innerHeight - rect.top + 10))}px`;
+    panel.style.bottom = "auto";
   }
 
   private teardownPlayerControls(): void {
     this.playerBarObserver?.disconnect();
     this.playerBarObserver = null;
-    this.nativeToggle?.li.remove();
+    this.nativeToggle?.container.remove();
     this.nativeToggle = null;
+    this.lastAnchorRect = null;
     this.playerRoot = null;
   }
 

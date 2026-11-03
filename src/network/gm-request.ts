@@ -33,6 +33,18 @@ export class GmRequestClient {
       maxBytes,
     } = options;
 
+      // 开发模式（vite-plugin-monkey 的 dev 加载器）把脚本注入页面上下文，
+      // 此时没有 GM_xmlhttpRequest，所有跨域请求都会在调用处直接抛 ReferenceError。
+      // 两个 Provider 的目标站点都不返回 CORS 头，fetch 兜底不可行，只能明确报错。
+      if (typeof GM_xmlhttpRequest !== "function") {
+          return Promise.reject(
+              new SubtitleError(
+                  "NETWORK_UNAVAILABLE",
+                  "当前环境没有 GM_xmlhttpRequest，无法跨域请求字幕来源",
+              ),
+          );
+      }
+
     return new Promise<GmResponse<T>>((resolve, reject) => {
       const handle = GM_xmlhttpRequest({
         method,

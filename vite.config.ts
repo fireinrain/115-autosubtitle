@@ -20,6 +20,7 @@ export default defineConfig({
         "run-at": "document-idle",
         match: [
           "https://115vod.com/*",
+            "https://115.com/players/*",
         ],
         grant: [
           "GM_getValue",

@@ -653,6 +653,10 @@ Provider 的职责仅限于该来源的搜索与下载；不允许 Provider 自�
 | SSA | 可选基础解析 | 完整样式 | 与 ASS 共享解析路径 |
 | ZIP 内字幕 | 不必 | 后续 | 安全解压，只提取受支持文件 |
 
+> 当前实现（2026-11-03）：SRT、VTT 已实现解析；ASS/SSA 仅按扩展名识别，
+> `parseSubtitle()` 会返回 `UNSUPPORTED_FORMAT`，尚未实现基础解析或完整渲染。
+> 相关优化项见 `docs/optimization-backlog.md`。
+
 ### 9.2 统一 Cue 模型
 
 ```typescript
@@ -1016,6 +1020,40 @@ export interface SubtitleRecord {
 ### 12.7 缓存去重
 
 同一字幕可由多个来源返回。可以按 checksum 检测完全相同文件，避免重复保存 Blob；但应保留不同 Provider 的来源元数据或来源映射，不要把来源信息丢掉。
+
+同一番号在缓存中只保留一份字幕：
+
+- 用户使用一条**新**字幕（在线下载或本地导入）后，自动删除该番号的其他缓存记录，只保留刚使用的这条；UI 通过 toast 提示替换数量。
+- 分组按归一化番号（去空白、统一大写）进行，与手动「缓存字幕去重」一致。
+- 被删除记录若正被当前视频引用，选中引用重定向到新记录；若被其他视频引用则清除引用，绝不把其他视频的字幕挂到当前视频上。
+- 手动「缓存字幕去重」仍按 `createdAt` / `lastUsedAt` 保留最新的一条，作为批量清理入口。
+
+### 12.8 跨播放域名元数据同步（GM）
+
+`115vod.com` 与 `115.com` 是不同 origin，IndexedDB 无法共享；Tampermonkey 的 GM 存储对同一脚本跨 origin 共享，因此只同步元数据。
+
+实现约定：
+
+- GM 键 `metadataSync.v1`，按播放域名分 bucket：
+  `{ version, buckets: { [origin]: { updatedAt, subtitles, videos } } }`。
+- 每个 origin 只覆盖自己的 bucket；启动时以及每次缓存变更（保存、删除、清空、去重、切换选中）后发布。
+-
+字幕元数据包含：id、videoKey、code、providerId、sourceId、title、language、format、cueCount、checksum、size、createdAt、lastUsedAt、isFavorite、sourceResult。
+- `sourceResult` 只保留重新下载所需字段（providerId、sourceId、title、format、downloadUrl 等），不包含 Blob、Cues 或匹配说明。
+- 视频元数据包含：videoKey、code、selectedSubtitleId、offsetMs、subtitleEnabled、updatedAt。
+- 读取 GM 数据时逐字段校验；坏数据只丢弃对应条目，不让整个同步功能失效。
+- 视频匹配优先精确 `videoKey`，其次按 `id:<pickcode>` 文件 ID 匹配，避免时长舍入差异导致对不上。
+- 恢复顺序：本地缓存 → 其他域名中“选中且可重新下载”的缓存 → 自动搜索。
+- 本地导入的字幕没有下载地址，远程列表只显示说明，不能自动恢复。
+- 远程恢复会等待当前视频 metadata 就绪后再写入 IndexedDB，避免写到弱 `videoKey`。
+- 单个 origin 最多同步 500 条字幕和 500 条视频记录，超出按最近使用/更新时间截断。
+
+限制：
+
+- 旧缓存记录在加入该功能前没有 `sourceResult`，只能显示为不可恢复；重新从在线来源使用一次后才会具备恢复能力。
+- 下载地址可能过期或来源下线，恢复失败时回退到自动搜索。
+- 两个域名的选中状态可能不一致（例如某域名刚替换了同番号字幕）；跨域恢复以另一域名的选中项为准。
+- 开发模式下 GM 存储不可用，会回退到按 origin 隔离的 localStorage，无法跨域同步。
 
 ---
 
@@ -1654,6 +1692,9 @@ OverlayRenderer 不访问 `video.currentTime`，时间由 TimelineEngine 提供�
 
 ### 阶段 5：高级格式和优化
 
+> 2026-11-03 更新：ASS/SSA 渲染、ZIP 导入、多字幕轨道/双语等高级字幕能力已从当前优化清单移除。
+> 本节保留为远期设计参考，不作为当前待办；当前只承诺 SRT/VTT。
+
 任务：
 
 1. 完善 VTT。
@@ -2003,3 +2044,34 @@ AI 应按以下顺序执行，不得直接跳到在线字幕网站爬取：
 实现顺序应以“播放器接入和本地 SRT 播放”作为第一里程碑，再实现视频身份和本地缓存，最后接入在线字幕搜索。该顺序可以尽早验证最关键的 115 DOM、视频生命周期、全屏与时间轴问题，同时避免在播放器尚未适配成功前投入大量精力开发字幕网站接口。
 
 凡是与 115 页面结构、实际文件名字段、文件 ID 来源、播放器全屏模式相关的细节，都必须通过用户当前使用的 115 网页实测确认；本设计书有意将这些内容定义为适配点，而不是猜测具体实现。
+
+---
+
+# 附录 D：当前实现状态与优化入口（2026-11-03）
+
+## D.1 已实现能力
+
+- 旧播放页 `115vod.com` 与新播放页 `115.com/players/video/*` 的播放器发现、CC 入口和 overlay。
+- 番号自动识别、手动输入查询、迅雷/SubtitleCat 搜索、评分排序与去重。
+- SRT/VTT 解析、时间轴同步、样式与偏移、字幕预览和单文件下载。
+- IndexedDB 缓存、跨视频隔离、选中恢复、同番号自动替换、手动去重、ZIP 导出。
+- 无缓存自动搜索（只提示，不自动应用）。
+- GM 跨播放域名缓存元数据同步；可下载来源支持跨域自动恢复。
+- 视频切换清理、搜索代次隔离、metadata 就绪门控、网页全屏下 CC/overlay 保留。
+
+## D.2 尚未实现或待验证
+
+- ASS/SSA 不解析：只识别格式并返回不支持错误（作为已知限制，不再列入优化清单）。
+- 手动番号持久化（`codeSource` 未写入 `manual`）。
+- 缓存容量上限、按天清理、收藏保护与相关 UI。
+- 字幕拖动定位、快捷键、匹配原因展示。
+- 原生「桌面全屏」验证与 `<video>` 全屏 fallback。
+- 搜索/下载在视频切换时的主动取消、下载重定向最终域名校验。
+- 跨域元数据的实时刷新、手动刷新入口、旧记录 `sourceResult` 补齐。
+- Firefox / Violentmonkey 兼容性未验证。
+
+## D.3 文档入口
+
+- 用户能力与限制：`README.md`
+- 115 播放器实测：`docs/115-player-inspection.md`
+- 优化优先级与验收建议：`docs/optimization-backlog.md`

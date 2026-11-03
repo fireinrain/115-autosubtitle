@@ -14,6 +14,8 @@ export interface PlayerControllerEvents {
   onPlayerContextAttached?: (context: PlayerContext) => void;
   onSubtitleLoaded?: (title: string, subtitleId: string | null) => void;
   onSubtitleCleared?: () => void;
+    /** 缓存恢复流程结束（无论是否命中），供上层决定是否自动搜索。 */
+    onCacheRestoreSettled?: (identity: VideoIdentity, restored: boolean) => void;
 }
 
 export class PlayerController {
@@ -32,6 +34,8 @@ export class PlayerController {
   private currentSubtitleId: string | null = null;
   private settings: GlobalSettings | null = null;
   private subtitleVisible = true;
+    /** 当前 video 的元数据是否已就绪（切换视频时 115 会先改 URL 再替换 src）。 */
+    private mediaMetadataReady = false;
 
   constructor(adapter: PlayerAdapter, events: PlayerControllerEvents = {}) {
     this.adapter = adapter;
@@ -89,18 +93,23 @@ export class PlayerController {
       !this.currentSubtitleId &&
       this.settings?.autoLoadCachedSubtitle
     ) {
-      void this.restoreCachedSubtitle(next.videoKey);
+        void this.restoreCachedSubtitle(next);
     }
   }
 
   /** 按 videoKey 恢复上次选中的字幕（仅在当前没有选中字幕时生效）。 */
-  private async restoreCachedSubtitle(videoKey: string): Promise<void> {
+  private async restoreCachedSubtitle(identity: VideoIdentity): Promise<void> {
     const gen = this.generation;
-    const cached = await subtitleRepository.getSelectedForVideo(videoKey);
-    if (gen !== this.generation || !cached || this.currentSubtitleId) return;
+      const cached = await subtitleRepository.getSelectedForVideo(identity.videoKey);
+      if (gen !== this.generation) return;
+      if (!cached || this.currentSubtitleId) {
+          this.events.onCacheRestoreSettled?.(identity, Boolean(cached));
+          return;
+      }
     this.currentSubtitleId = cached.id;
     this.loadCues(cached.cues);
     this.events.onSubtitleLoaded?.(cached.title, cached.id);
+      this.events.onCacheRestoreSettled?.(identity, true);
   }
 
   private isSameVideo(a: PlayerContext, b: PlayerContext): boolean {
@@ -122,6 +131,9 @@ export class PlayerController {
     this.renderer.mount(ctx.overlayHost);
     this.renderer.setVisible(this.subtitleVisible);
     if (this.settings) this.renderer.setStyle(this.settings.style);
+      // 115 切换视频时 URL/标题会先变，src 和 metadata 随后才就绪。
+      // 记录当前是否已有可用元数据，供自动搜索判断“现在搜索是否已经安全”。
+      this.mediaMetadataReady = ctx.video.readyState >= 1;
 
     const identity = this.identityService.resolve(ctx.metadata);
     this.currentIdentity = identity;
@@ -129,19 +141,11 @@ export class PlayerController {
     this.events.onPlayerContextAttached?.(ctx);
 
     this.bindVideoEvents(ctx.video);
-
-    if (this.settings?.autoLoadCachedSubtitle) {
-      const cached = await subtitleRepository.getSelectedForVideo(identity.videoKey);
-      if (myGen !== this.generation) return;
-      if (cached) {
-        this.loadCues(cached.cues);
-        this.currentSubtitleId = cached.id;
-        this.events.onSubtitleLoaded?.(cached.title, cached.id);
-        return;
-      }
-    }
-
     this.startRenderLoop(ctx.video);
+
+      if (this.settings?.autoLoadCachedSubtitle) {
+          await this.restoreCachedSubtitle(identity);
+      }
   }
 
   private async detach(): Promise<void> {
@@ -154,11 +158,19 @@ export class PlayerController {
     this.currentSubtitleId = null;
     this.currentContext = null;
     this.currentIdentity = null;
+      this.mediaMetadataReady = false;
     this.events.onSubtitleCleared?.();
   }
 
   private bindVideoEvents(video: HTMLVideoElement): void {
     const handlers: Array<[string, EventListener]> = [
+        // 新视频开始加载时先标记元数据未就绪，避免自动搜索在切换窗口里用旧视频的时长查缓存。
+        ["loadstart", () => {
+            this.mediaMetadataReady = false;
+        }],
+        ["emptied", () => {
+            this.mediaMetadataReady = false;
+        }],
       ["loadedmetadata", () => this.onMetadata(video)],
       // 实测：115 播放器在暂停状态下拖动进度条只会触发 `seeking`，
       // `seeked` 可能延迟到恢复播放才触发，导致字幕停在旧内容上。
@@ -186,10 +198,14 @@ export class PlayerController {
   }
 
   private onMetadata(video: HTMLVideoElement): void {
+      this.mediaMetadataReady = true;
     if (this.currentContext) {
       this.currentContext.metadata.duration = isFiniteNumber(video.duration) ? video.duration : undefined;
       this.currentContext.metadata.width = video.videoWidth || undefined;
       this.currentContext.metadata.height = video.videoHeight || undefined;
+        // 切换视频时 videoKey 可能先只有 id，loadedmetadata 后才补上时长。
+        // 若这里不立即刷新身份，缓存恢复会用弱 key 查不到记录，从而误触发自动搜索。
+        this.refreshIdentity(this.currentContext);
     }
     this.refresh();
   }
@@ -248,6 +264,11 @@ export class PlayerController {
   getCurrentSubtitleId(): string | null {
     return this.currentSubtitleId;
   }
+
+    /** 当前 video 的元数据是否已就绪；115 切换视频期间会短暂为 false。 */
+    isMediaMetadataReady(): boolean {
+        return this.mediaMetadataReady;
+    }
 
   private startRenderLoop(video: HTMLVideoElement): void {
     if (this.rafId !== null) return;

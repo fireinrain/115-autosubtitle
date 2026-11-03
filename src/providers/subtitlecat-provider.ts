@@ -81,7 +81,13 @@ export class SubtitleCatProvider implements SubtitleProvider {
         maxBytes: 5 * 1024 * 1024,
       });
 
-      const fileName = result.title || `subtitle.${result.format}`;
+        // SubtitleCat 的搜索结果标题通常不带扩展名（如 `DVAJ-758.zh-cn(by transub)`），
+        // 直接当作文件名会让 detectFormat 判为 unknown。优先用下载地址里的真实文件名。
+        const titleHasExtension = /\.(srt|vtt|ass|ssa)$/i.test(result.title ?? "");
+        const urlFileName = decodeURIComponent(url.pathname.split("/").pop() || "");
+        const fileName =
+            (titleHasExtension ? result.title : urlFileName) ||
+            `${result.title || "subtitle"}.${result.format}`;
       const checksum = await computeChecksum(resp.body);
 
       return {

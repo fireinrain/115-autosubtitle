@@ -57,7 +57,6 @@
 	var PLAYER_BOX_SELECTOR = "#js-video_box";
 	var PICKCODE_PARAM = "pickcode";
 	var MODERN_PLAYER_PATH = /^\/players\/video\/([^/]+)\/?$/;
-
 	function parseModernPlayerUrl(rawUrl) {
 		let url;
 		try {
@@ -71,8 +70,7 @@
 		let pickcode = match[1];
 		try {
 			pickcode = decodeURIComponent(pickcode);
-		} catch {
-		}
+		} catch {}
 		const fileName = url.searchParams.get("name") || void 0;
 		const fid = url.searchParams.get("fid") || void 0;
 		const fileId = pickcode || fid;
@@ -90,7 +88,6 @@
 			if (modern) return this.detectModern(modern);
 			return this.detectLegacy();
 		}
-
 		detectLegacy() {
 			const video = document.querySelector(VIDEO_SELECTOR);
 			if (!video) return null;
@@ -105,7 +102,6 @@
 				metadata: this.readMetadata(video)
 			};
 		}
-
 		detectModern(info) {
 			const video = this.findVisibleVideo();
 			if (!video) return null;
@@ -118,13 +114,11 @@
 				metadata: this.readMetadata(video, info)
 			};
 		}
-
 		resolveModernPlayerRoot(video) {
 			const parent = video.parentElement;
 			if (parent && (parent.querySelector("button") || parent.querySelector("[class*=\"bottom-0\"]"))) return parent;
 			return video.closest("div[class*=\"aspect-video\"]") ?? parent ?? document.body;
 		}
-
 		findVisibleVideo() {
 			const candidates = [...document.querySelectorAll("video")].map((video) => {
 				return {
@@ -132,10 +126,7 @@
 					rect: video.getBoundingClientRect(),
 					style: getComputedStyle(video)
 				};
-			}).filter(({
-						   rect,
-						   style
-					   }) => rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden");
+			}).filter(({ rect, style }) => rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden");
 			if (candidates.length === 0) return null;
 			if (candidates.length === 1) return candidates[0].video;
 			candidates.sort((a, b) => {
@@ -145,11 +136,9 @@
 			});
 			return candidates[0].video;
 		}
-
 		ensurePositioned(playerRoot) {
 			if (getComputedStyle(playerRoot).position === "static") playerRoot.style.position = "relative";
 		}
-
 		readMetadata(video, modern) {
 			return {
 				platform: "115",
@@ -217,7 +206,6 @@
 		}
 	};
 	var m115VideoAdapter = new M115VideoAdapter();
-
 	function normalizeFileName$1(input) {
 		return input.normalize("NFKC").replace(/\.[a-z0-9]{2,5}$/i, "").replace(/[\s_.]+/g, " ").replace(/[\u005B\u005D【】（）()]/g, " ").replace(/\s+/g, " ").trim().toUpperCase();
 	}
@@ -413,11 +401,9 @@
 		}
 	];
 	var DEFAULT_SUBTITLE_FONT = FONT_PRESETS[0].fontFamily;
-
 	function findFontPreset(fontFamily) {
 		return FONT_PRESETS.find((preset) => preset.fontFamily === fontFamily);
 	}
-
 	function normalizeFontFamily(value) {
 		if (typeof value !== "string" || value.trim().length === 0) return DEFAULT_SUBTITLE_FONT;
 		if (/[;{}<>]/.test(value)) return DEFAULT_SUBTITLE_FONT;
@@ -503,7 +489,6 @@
 		isVisible() {
 			return this.visible;
 		}
-
 		setPositioningMode(enabled, onCommit) {
 			this.positioning = enabled;
 			this.onPositionCommit = onCommit ?? null;
@@ -515,7 +500,6 @@
 			this.applyStyle();
 			this.render();
 		}
-
 		isPositioningMode() {
 			return this.positioning;
 		}
@@ -591,7 +575,6 @@
 				this.stage.appendChild(line);
 			}
 		}
-
 		handlePointerDown = (event) => {
 			if (!this.positioning || !this.stage || !this.host) return;
 			if (event.button !== 0) return;
@@ -636,7 +619,6 @@
 			this.unmount();
 		}
 	};
-
 	function clampPercent(value, min, max) {
 		return Math.min(max, Math.max(min, value));
 	}
@@ -644,7 +626,6 @@
 		const h = hex.replace("#", "");
 		return `rgba(${parseInt(h.substring(0, 2), 16)}, ${parseInt(h.substring(2, 4), 16)}, ${parseInt(h.substring(4, 6), 16)}, ${alpha})`;
 	}
-
 	function toSubtitleMeta(record) {
 		return {
 			id: record.id,
@@ -664,7 +645,6 @@
 			sourceResult: record.sourceResult
 		};
 	}
-
 	var DB_NAME = "115AutoSubtitleDB";
 	var Database = class {
 		dbPromise = null;
@@ -679,7 +659,6 @@
 			});
 			return this.dbPromise;
 		}
-
 		upgrade(db, oldVersion) {
 			if (!db.objectStoreNames.contains("subtitles")) {
 				const store = db.createObjectStore("subtitles", { keyPath: "id" });
@@ -692,12 +671,12 @@
 			if (!db.objectStoreNames.contains("videoRecords")) db.createObjectStore("videoRecords", { keyPath: "videoKey" }).createIndex("lastPlayedAt", "lastPlayedAt", { unique: false });
 			if (!db.objectStoreNames.contains("settings")) db.createObjectStore("settings", { keyPath: "key" });
 			if (!db.objectStoreNames.contains("subtitleMeta")) {
-				const metaStore = db.createObjectStore("subtitleMeta", {keyPath: "id"});
-				metaStore.createIndex("videoKey", "videoKey", {unique: false});
-				metaStore.createIndex("code", "code", {unique: false});
-				metaStore.createIndex("providerId", "providerId", {unique: false});
-				metaStore.createIndex("lastUsedAt", "lastUsedAt", {unique: false});
-				metaStore.createIndex("checksum", "checksum", {unique: false});
+				const metaStore = db.createObjectStore("subtitleMeta", { keyPath: "id" });
+				metaStore.createIndex("videoKey", "videoKey", { unique: false });
+				metaStore.createIndex("code", "code", { unique: false });
+				metaStore.createIndex("providerId", "providerId", { unique: false });
+				metaStore.createIndex("lastUsedAt", "lastUsedAt", { unique: false });
+				metaStore.createIndex("checksum", "checksum", { unique: false });
 				if (oldVersion < 2 && db.objectStoreNames.contains("subtitles")) {
 					const cursorReq = metaStore.transaction.objectStore("subtitles").openCursor();
 					cursorReq.onsuccess = () => {
@@ -742,14 +721,13 @@
 	function isSubtitleError(error) {
 		return error instanceof SubtitleError;
 	}
-
 	function normalizeCode$1(code) {
 		return code.trim().toUpperCase().replace(/\s+/g, "");
 	}
 	var SubtitleRepository = class {
 		async save(record) {
 			try {
-				const {tx, stores} = await database.transaction(["subtitles", "subtitleMeta"], "readwrite");
+				const { tx, stores } = await database.transaction(["subtitles", "subtitleMeta"], "readwrite");
 				stores.subtitles.put(record);
 				stores.subtitleMeta.put(toSubtitleMeta(record));
 				await this.waitForTransaction(tx);
@@ -774,18 +752,16 @@
 			await this.waitForTransaction(tx);
 			return req.result ?? [];
 		}
-
 		async findBySource(videoKey, providerId, sourceId) {
 			if (!sourceId) return null;
 			return (await this.getByVideoKey(videoKey)).find((r) => r.providerId === providerId && r.sourceId === sourceId) ?? null;
 		}
-
 		async findByChecksum(videoKey, checksum) {
 			if (!checksum) return null;
 			return (await this.getByVideoKey(videoKey)).find((r) => r.checksum === checksum) ?? null;
 		}
 		async delete(id) {
-			const {tx, stores} = await database.transaction([
+			const { tx, stores } = await database.transaction([
 				"subtitles",
 				"subtitleMeta",
 				"videoRecords"
@@ -812,14 +788,12 @@
 			await this.waitForTransaction(tx);
 			return req.result ?? [];
 		}
-
 		async getAllMetadata() {
-			const {tx, stores} = await database.transaction("subtitleMeta", "readonly");
+			const { tx, stores } = await database.transaction("subtitleMeta", "readonly");
 			const req = stores.subtitleMeta.getAll();
 			await this.waitForTransaction(tx);
 			return req.result ?? [];
 		}
-
 		async deduplicateByCode() {
 			const all = await this.getAll();
 			const groups = new Map();
@@ -844,7 +818,7 @@
 				kept: all.length,
 				groups: 0
 			};
-			const {tx, stores} = await database.transaction([
+			const { tx, stores } = await database.transaction([
 				"subtitles",
 				"subtitleMeta",
 				"videoRecords"
@@ -877,17 +851,16 @@
 				groups: mergedGroups
 			};
 		}
-
 		async replaceByCode(code, keepId) {
 			const key = normalizeCode$1(code);
-			if (!key) return {removed: 0};
+			if (!key) return { removed: 0 };
 			const all = await this.getAll();
 			const keep = all.find((r) => r.id === keepId);
-			if (!keep) return {removed: 0};
+			if (!keep) return { removed: 0 };
 			const removed = all.filter((r) => r.id !== keepId && normalizeCode$1(r.code ?? "") === key);
-			if (removed.length === 0) return {removed: 0};
+			if (removed.length === 0) return { removed: 0 };
 			const removedIds = new Set(removed.map((r) => r.id));
-			const {tx, stores} = await database.transaction([
+			const { tx, stores } = await database.transaction([
 				"subtitles",
 				"subtitleMeta",
 				"videoRecords"
@@ -912,7 +885,7 @@
 				videoReq.onerror = () => reject(videoReq.error);
 			});
 			await this.waitForTransaction(tx);
-			return {removed: removed.length};
+			return { removed: removed.length };
 		}
 		async getSelectedForVideo(videoKey) {
 			const { tx, stores } = await database.transaction("videoRecords", "readonly");
@@ -922,10 +895,9 @@
 			if (!record?.selectedSubtitleId) return null;
 			return this.getById(record.selectedSubtitleId);
 		}
-
 		async setManualCode(videoKey, code) {
 			const now = Date.now();
-			const {tx, stores} = await database.transaction("videoRecords", "readwrite");
+			const { tx, stores } = await database.transaction("videoRecords", "readwrite");
 			const getReq = stores.videoRecords.get(videoKey);
 			await new Promise((resolve) => {
 				getReq.onsuccess = () => {
@@ -984,9 +956,8 @@
 			await this.waitForTransaction(tx);
 			return req.result ?? null;
 		}
-
 		async getAllVideoRecords() {
-			const {tx, stores} = await database.transaction("videoRecords", "readonly");
+			const { tx, stores } = await database.transaction("videoRecords", "readonly");
 			const req = stores.videoRecords.getAll();
 			await this.waitForTransaction(tx);
 			return req.result ?? [];
@@ -996,7 +967,6 @@
 			stores.videoRecords.put(record);
 			await this.waitForTransaction(tx);
 		}
-
 		async cleanup(options) {
 			const all = await this.getAll();
 			const now = options.now ?? Date.now();
@@ -1025,7 +995,7 @@
 				totalBytes
 			};
 			const freedBytes = [...removedIds].reduce((sum, id) => sum + (sizes.get(id) ?? 0), 0);
-			const {tx, stores} = await database.transaction([
+			const { tx, stores } = await database.transaction([
 				"subtitles",
 				"subtitleMeta",
 				"videoRecords"
@@ -1069,7 +1039,7 @@
 			};
 		}
 		async clearAll() {
-			const {tx, stores} = await database.transaction([
+			const { tx, stores } = await database.transaction([
 				"subtitles",
 				"subtitleMeta",
 				"videoRecords"
@@ -1118,7 +1088,6 @@
 			const initial = this.adapter.detect();
 			if (initial) this.handleContext(initial);
 		}
-
 		handleFullscreenChange = () => {
 			const fullscreen = document.fullscreenElement;
 			const context = this.currentContext;
@@ -1146,7 +1115,6 @@
 			this.events.onVideoChange?.(next);
 			if (prev && prev.videoKey !== next.videoKey && !this.currentSubtitleId && this.settings?.autoLoadCachedSubtitle) this.restoreCachedSubtitle(next);
 		}
-
 		async restoreCachedSubtitle(identity) {
 			const gen = this.generation;
 			const cached = await subtitleRepository.getSelectedForVideo(identity.videoKey);
@@ -1270,13 +1238,11 @@
 			this.subtitleVisible = visible;
 			this.renderer.setVisible(visible);
 		}
-
 		setPositioningMode(enabled) {
 			this.renderer.setPositioningMode(enabled, (xPercent, yPercent) => {
 				this.events.onPositionChange?.(xPercent, yPercent);
 			});
 		}
-
 		isPositioningMode() {
 			return this.renderer.isPositioningMode();
 		}
@@ -1289,7 +1255,6 @@
 		getCurrentSubtitleId() {
 			return this.currentSubtitleId;
 		}
-
 		isMediaMetadataReady() {
 			return this.mediaMetadataReady;
 		}
@@ -1353,7 +1318,7 @@
 			try {
 				let attempt = 0;
 				const retries = Math.max(0, options.retry ?? 0);
-				for (; ;) try {
+				for (;;) try {
 					return await this.requestOnce(options);
 				} catch (error) {
 					if (attempt >= retries || !this.shouldRetry(error) || options.signal?.aborted) throw error;
@@ -1364,19 +1329,8 @@
 				this.release();
 			}
 		}
-
 		async requestOnce(options) {
-			const {
-				url,
-				method = "GET",
-				headers,
-				data,
-				responseType = "text",
-				timeoutMs = 15e3,
-				signal,
-				maxBytes,
-				allowedHosts
-			} = options;
+			const { url, method = "GET", headers, data, responseType = "text", timeoutMs = 15e3, signal, maxBytes, allowedHosts } = options;
 			if (typeof GM_xmlhttpRequest !== "function") return Promise.reject(new SubtitleError("NETWORK_UNAVAILABLE", "当前环境没有 GM_xmlhttpRequest，无法跨域请求字幕来源"));
 			return new Promise((resolve, reject) => {
 				const handle = GM_xmlhttpRequest({
@@ -1446,7 +1400,6 @@
 				}
 			});
 		}
-
 		hostOf(url) {
 			try {
 				return new URL(url).hostname;
@@ -1454,7 +1407,6 @@
 				return "unknown-host";
 			}
 		}
-
 		async acquire(host, signal) {
 			if (signal?.aborted) throw new SubtitleError("PROVIDER_TIMEOUT", "请求已取消");
 			while (this.activeRequests >= MAX_CONCURRENT_REQUESTS) {
@@ -1467,18 +1419,15 @@
 			this.activeRequests++;
 			this.hostNextAllowedAt.set(host, Date.now());
 		}
-
 		release() {
 			this.activeRequests = Math.max(0, this.activeRequests - 1);
 			this.waiters.shift()?.();
 		}
-
 		shouldRetry(error) {
 			if (!(error instanceof SubtitleError)) return false;
 			if (error.code === "PROVIDER_NETWORK_ERROR") return true;
 			return error.code === "PROVIDER_BAD_RESPONSE" && /^HTTP 5\d\d\b/.test(error.message);
 		}
-
 		sleep(ms, signal) {
 			if (signal?.aborted) return Promise.reject(new SubtitleError("PROVIDER_TIMEOUT", "请求已取消"));
 			return new Promise((resolve, reject) => {
@@ -1490,7 +1439,7 @@
 					clearTimeout(timer);
 					reject(new SubtitleError("PROVIDER_TIMEOUT", "请求已取消"));
 				};
-				signal?.addEventListener("abort", onAbort, {once: true});
+				signal?.addEventListener("abort", onAbort, { once: true });
 			});
 		}
 		parseHeaders(raw) {
@@ -1587,7 +1536,6 @@
 				throw new SubtitleError("PROVIDER_NETWORK_ERROR", "迅雷字幕搜索失败", e);
 			}
 		}
-
 		async healthCheck() {
 			try {
 				const url = new URL(SEARCH_ENDPOINT);
@@ -1600,7 +1548,7 @@
 					allowedHosts: [SEARCH_HOST],
 					retry: 1
 				});
-				return {ok: true};
+				return { ok: true };
 			} catch (e) {
 				return {
 					ok: false,
@@ -1686,7 +1634,6 @@
 				throw new SubtitleError("PROVIDER_NETWORK_ERROR", "SubtitleCat 搜索失败", e);
 			}
 		}
-
 		async healthCheck() {
 			try {
 				await gmRequestClient.request({
@@ -1697,7 +1644,7 @@
 					allowedHosts: ALLOWED_HOSTS,
 					retry: 1
 				});
-				return {ok: true};
+				return { ok: true };
 			} catch (e) {
 				return {
 					ok: false,
@@ -1861,7 +1808,6 @@
 			if (looksLikeUtf8(view)) return "utf-8";
 			return "gb18030";
 		}
-
 		decode(bytes, encoding) {
 			const enc = encoding ?? this.detect(bytes);
 			if (enc === "utf-8") {
@@ -1873,12 +1819,11 @@
 			if (enc === "gb18030" || enc === "gbk") try {
 				return new TextDecoder("gb18030").decode(bytes);
 			} catch {
-				return new TextDecoder("utf-8", {fatal: false}).decode(bytes);
+				return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 			}
-			return new TextDecoder("utf-8", {fatal: false}).decode(bytes);
+			return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 		}
 	};
-
 	function looksLikeUtf8(view) {
 		let i = 0;
 		const len = Math.min(view.length, 8192);
@@ -1899,11 +1844,9 @@
 		}
 		return true;
 	}
-
 	var encodingDetector = new DefaultEncodingDetector();
 	var PREVIEW_MAX_CHARS = 2e5;
 	var PREVIEW_MAX_LINES = 4e3;
-
 	function decodeRawSubtitle(bytes, encoding) {
 		try {
 			return encodingDetector.decode(bytes, encoding);
@@ -1911,13 +1854,11 @@
 			return "";
 		}
 	}
-
 	function formatCuesWithTimestamps(cues) {
 		return cues.map((cue, index) => {
 			return `${index + 1}. ${formatTimestamp(cue.startMs)} --> ${formatTimestamp(cue.endMs)}\n${cue.text}`;
 		}).join("\n\n");
 	}
-
 	function formatTimestamp(ms) {
 		const total = Math.max(0, Math.round(ms));
 		const hours = Math.floor(total / 36e5);
@@ -1926,7 +1867,6 @@
 		const millis = total % 1e3;
 		return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(seconds, 2)},${pad(millis, 3)}`;
 	}
-
 	function limitPreviewText(text) {
 		const lines = text.split("\n");
 		let truncated = false;
@@ -1943,7 +1883,6 @@
 		if (!truncated) return text;
 		return `${result}\n\n…（字幕较长，仅显示前 ${Math.min(lines.length, PREVIEW_MAX_LINES)} 行）`;
 	}
-
 	function pad(value, length) {
 		return String(value).padStart(length, "0");
 	}
@@ -2146,17 +2085,14 @@
 			this.cachedSubtitles = subtitles;
 			this.requestRender(["subs", "cache"]);
 		}
-
 		setRemoteSubtitles(subtitles) {
 			this.remoteSubtitles = subtitles;
 			this.requestRender(["subs", "cache"]);
 		}
-
 		setRemoteSummary(summary) {
 			this.remoteSummary = summary;
 			this.requestRender(["cache"]);
 		}
-
 		setCacheSummary(summary) {
 			const changed = this.cacheSummary.count !== summary.count || this.cacheSummary.bytes !== summary.bytes;
 			this.cacheSummary = summary;
@@ -2218,7 +2154,6 @@
 			this.modalEl = overlay;
 			closeButton.focus();
 		}
-
 		showConfirm(message) {
 			if (!this.root) return Promise.resolve(false);
 			if (this.confirmEl) this.closeConfirm(false);
@@ -2247,7 +2182,6 @@
 				this.confirmResolve = resolve;
 			});
 		}
-
 		closeConfirm(value) {
 			if (!this.confirmEl) return;
 			this.confirmEl.remove();
@@ -2285,13 +2219,11 @@
 			this.updateStatusPill();
 			this.requestRender(["subs"]);
 		}
-
 		setPositioning(active) {
 			if (this.positioning === active) return;
 			this.positioning = active;
 			this.requestRender(["style"]);
 		}
-
 		findNativeSubtitleControl(root) {
 			const items = root.querySelectorAll(".operate-bar .bar-side > ul > li");
 			for (const li of items) {
@@ -2427,7 +2359,6 @@
 			}
 			if (this.visible) this.hide();
 		};
-
 		handleShortcut(event) {
 			if (!this.settings?.shortcuts.enabled) return false;
 			if (this.modalEl || this.confirmEl) return false;
@@ -2459,11 +2390,9 @@
 					this.callbacks.onToggleSubtitle(!this.subtitleVisible);
 					event.preventDefault();
 					return true;
-				default:
-					return false;
+				default: return false;
 			}
 		}
-
 		isEditableTarget(target) {
 			if (!(target instanceof HTMLElement)) return false;
 			const tag = target.tagName;
@@ -2535,7 +2464,6 @@
 			this.bodyEl?.setAttribute("aria-labelledby", `userscript-tab-${tab}`);
 			this.scheduleRender();
 		}
-
 		handleTabKeyDown = (event) => {
 			const currentIndex = TABS.findIndex((item) => item.id === this.activeTab);
 			let nextIndex = null;
@@ -2557,13 +2485,11 @@
 			this.statusPill.setAttribute("aria-pressed", String(this.subtitleVisible));
 			this.statusPill.title = this.subtitleVisible ? "点击隐藏字幕" : "点击显示字幕";
 		}
-
 		requestRender(tabs) {
 			if (!this.visible) return;
 			if (tabs && !tabs.includes(this.activeTab)) return;
 			this.scheduleRender();
 		}
-
 		scheduleRender() {
 			if (!this.bodyEl || this.renderScheduled) return;
 			this.renderScheduled = true;
@@ -2788,7 +2714,6 @@
 			}
 			return section;
 		}
-
 		async previewCached(record) {
 			let content = formatCuesWithTimestamps(record.cues);
 			if (!content.trim()) try {
@@ -3011,7 +2936,6 @@
 			pane.appendChild(section);
 			return pane;
 		}
-
 		fontRow(current) {
 			const row = div("row");
 			row.appendChild(div("field-label", "字体"));
@@ -3032,7 +2956,7 @@
 			}
 			select.value = current;
 			select.addEventListener("change", () => {
-				this.callbacks.onStyleChange({fontFamily: select.value});
+				this.callbacks.onStyleChange({ fontFamily: select.value });
 			});
 			row.appendChild(select);
 			return row;
@@ -3484,7 +3408,6 @@
 		}
 		return out;
 	}
-
 	var PROVIDER_COOLDOWN_MS = 6e4;
 	var SubtitleSearchEngine = class {
 		providerCooldownUntil = new Map();
@@ -3783,7 +3706,6 @@
 			default: return "unknown";
 		}
 	}
-
 	var CRC_TABLE = (() => {
 		const table = new Uint32Array(256);
 		for (let i = 0; i < 256; i++) {
@@ -3793,13 +3715,11 @@
 		}
 		return table;
 	})();
-
 	function crc32(data) {
 		let crc = 4294967295;
 		for (let i = 0; i < data.length; i++) crc = CRC_TABLE[(crc ^ data[i]) & 255] ^ crc >>> 8;
 		return (crc ^ 4294967295) >>> 0;
 	}
-
 	async function deflateRaw(data) {
 		if (typeof CompressionStream === "undefined") return null;
 		try {
@@ -3808,15 +3728,14 @@
 			return null;
 		}
 	}
-
 	async function transformBytes(stream, data) {
 		const reader = stream.readable.getReader();
 		const writer = stream.writable.getWriter();
 		const readPromise = (async () => {
 			const chunks = [];
 			let total = 0;
-			for (; ;) {
-				const {done, value} = await reader.read();
+			for (;;) {
+				const { done, value } = await reader.read();
 				if (done) break;
 				chunks.push(value);
 				total += value.length;
@@ -3833,16 +3752,13 @@
 		await writer.close();
 		return readPromise;
 	}
-
 	function sanitizeFileName(name) {
 		return (name.split(/[\\/]/).pop() ?? name).replace(/[\u0000-\u001f<>:"|?*]/g, "_").replace(/\s+/g, " ").trim() || "subtitle";
 	}
-
 	function ensureExtension(name, record) {
 		if (/\.[a-z0-9]{1,5}$/i.test(name)) return name;
 		return `${name}.${record.format === "unknown" ? "srt" : record.format}`;
 	}
-
 	function makeUniqueName(base, used) {
 		if (!used.has(base.toLowerCase())) {
 			used.add(base.toLowerCase());
@@ -3860,7 +3776,6 @@
 		used.add(candidate.toLowerCase());
 		return candidate;
 	}
-
 	function dosDateTime(timestamp) {
 		const date = new Date(isFiniteNumber(timestamp) ? timestamp : Date.now());
 		const year = Math.max(1980, date.getFullYear());
@@ -3869,7 +3784,6 @@
 			date: year - 1980 << 9 | date.getMonth() + 1 << 5 | date.getDate()
 		};
 	}
-
 	function localHeader(entry, time, date) {
 		const nameBytes = new TextEncoder().encode(entry.name);
 		const buf = new Uint8Array(30 + nameBytes.length);
@@ -3888,7 +3802,6 @@
 		buf.set(nameBytes, 30);
 		return buf;
 	}
-
 	function centralHeader(entry, offset, time, date) {
 		const nameBytes = new TextEncoder().encode(entry.name);
 		const buf = new Uint8Array(46 + nameBytes.length);
@@ -3913,7 +3826,6 @@
 		buf.set(nameBytes, 46);
 		return buf;
 	}
-
 	function endOfCentralDirectory(count, cdSize, cdOffset) {
 		const buf = new Uint8Array(22);
 		const view = new DataView(buf.buffer);
@@ -3927,7 +3839,6 @@
 		view.setUint16(20, 0, true);
 		return buf;
 	}
-
 	async function buildSubtitleZip(records) {
 		const usedNames = new Set();
 		const entries = [];
@@ -3949,10 +3860,7 @@
 		for (let i = 0; i < entries.length; i++) {
 			const entry = entries[i];
 			const source = records[i];
-			const {
-				time,
-				date
-			} = dosDateTime(source ? Math.max(source.createdAt ?? 0, source.lastUsedAt ?? 0) : Date.now());
+			const { time, date } = dosDateTime(source ? Math.max(source.createdAt ?? 0, source.lastUsedAt ?? 0) : Date.now());
 			const local = localHeader(entry, time, date);
 			chunks.push(local.buffer, entry.payload.buffer);
 			centralChunks.push(centralHeader(entry, offset, time, date));
@@ -3963,28 +3871,23 @@
 		const eocd = endOfCentralDirectory(entries.length, cdSize, cdOffset);
 		for (const chunk of centralChunks) chunks.push(chunk.buffer);
 		chunks.push(eocd.buffer);
-		return new Blob(chunks, {type: "application/zip"});
+		return new Blob(chunks, { type: "application/zip" });
 	}
-
 	var SYNC_KEY = "metadataSync.v1";
 	var SYNC_VERSION = 1;
 	var MAX_SUBTITLES_PER_ORIGIN = 500;
 	var MAX_VIDEOS_PER_ORIGIN = 500;
-
 	function getCurrentOrigin() {
 		return window.location.host || "unknown-origin";
 	}
-
 	function fileIdFromVideoKey(videoKey) {
 		return /^id:([^|]+)/.exec(videoKey)?.[1];
 	}
-
 	function matchesVideo(metaVideoKey, videoKey, fileId) {
 		if (metaVideoKey === videoKey) return true;
 		if (!fileId) return false;
 		return fileIdFromVideoKey(metaVideoKey) === fileId;
 	}
-
 	function sanitizeSourceResult(result) {
 		if (!result) return void 0;
 		return {
@@ -4004,11 +3907,9 @@
 			checksum: result.checksum
 		};
 	}
-
 	function subtitleSize(record) {
 		return "size" in record ? record.size : record.rawBlob?.size ?? 0;
 	}
-
 	function toSyncedSubtitle(record) {
 		return {
 			id: record.id,
@@ -4027,7 +3928,6 @@
 			sourceResult: sanitizeSourceResult(record.sourceResult)
 		};
 	}
-
 	function toSyncedVideo(record) {
 		return {
 			videoKey: record.videoKey,
@@ -4038,7 +3938,6 @@
 			updatedAt: record.updatedAt
 		};
 	}
-
 	function buildSyncBucket(subtitles, videos) {
 		return {
 			updatedAt: Date.now(),
@@ -4046,19 +3945,15 @@
 			videos: [...videos].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, MAX_VIDEOS_PER_ORIGIN).map(toSyncedVideo)
 		};
 	}
-
 	function isObject(value) {
 		return typeof value === "object" && value !== null;
 	}
-
 	function asString(value) {
 		return typeof value === "string" ? value : void 0;
 	}
-
 	function asNumber(value, fallback = 0) {
 		return isFiniteNumber(value) ? value : fallback;
 	}
-
 	function normalizeSourceResult(value) {
 		if (!isObject(value)) return void 0;
 		const providerId = asString(value.providerId);
@@ -4083,7 +3978,6 @@
 			checksum: asString(value.checksum)
 		};
 	}
-
 	function normalizeSubtitle(value) {
 		if (!isObject(value)) return null;
 		const id = asString(value.id);
@@ -4109,7 +4003,6 @@
 			sourceResult: normalizeSourceResult(value.sourceResult)
 		};
 	}
-
 	function normalizeVideo(value) {
 		if (!isObject(value)) return null;
 		const videoKey = asString(value.videoKey);
@@ -4123,7 +4016,6 @@
 			updatedAt: asNumber(value.updatedAt)
 		};
 	}
-
 	function normalizePayload$1(raw) {
 		const empty = {
 			version: SYNC_VERSION,
@@ -4146,18 +4038,14 @@
 			buckets
 		};
 	}
-
 	var MetadataSyncService = class {
 		origin;
-
 		constructor(origin = getCurrentOrigin()) {
 			this.origin = origin;
 		}
-
 		getOrigin() {
 			return this.origin;
 		}
-
 		async publish() {
 			try {
 				const [subtitles, videos] = await Promise.all([subtitleRepository.getAllMetadata(), subtitleRepository.getAllVideoRecords()]);
@@ -4168,7 +4056,6 @@
 				logger.warn("同步缓存元数据失败", e);
 			}
 		}
-
 		getRemoteForVideo(videoKey, fileId) {
 			const payload = this.readPayload();
 			const byId = new Map();
@@ -4203,7 +4090,6 @@
 				selected
 			};
 		}
-
 		getRemoteSummary() {
 			const payload = this.readPayload();
 			const seen = new Set();
@@ -4226,7 +4112,6 @@
 				origins
 			};
 		}
-
 		clearRemoteOrigins() {
 			const payload = this.readPayload();
 			const removed = [];
@@ -4238,7 +4123,6 @@
 			if (removed.length > 0) writeStoredValue(SYNC_KEY, payload);
 			return removed;
 		}
-
 		watch(callback) {
 			if (typeof GM_addValueChangeListener !== "function") return () => void 0;
 			try {
@@ -4248,15 +4132,13 @@
 				return () => {
 					try {
 						if (typeof GM_removeValueChangeListener === "function") GM_removeValueChangeListener(listenerId);
-					} catch {
-					}
+					} catch {}
 				};
 			} catch (e) {
 				logger.warn("注册 GM 存储变化监听失败，将使用轮询", e);
 				return () => void 0;
 			}
 		}
-
 		readPayload() {
 			return normalizePayload$1(readStoredValue(SYNC_KEY, null));
 		}
@@ -4264,16 +4146,13 @@
 	var metadataSync = new MetadataSyncService();
 	var AUTO_SEARCH_CACHE_KEY = "autoSearchCache.v1";
 	var MAX_ENTRIES = 20;
-
 	function normalizeCode(code) {
 		return code.trim().toUpperCase().replace(/\s+/g, "");
 	}
-
 	function normalizeFileName(name) {
 		if (!name) return "";
 		return name.trim().toLowerCase().replace(/\s+/g, " ");
 	}
-
 	function buildAutoSearchCacheKey(input) {
 		const code = normalizeCode(input.code);
 		if (!code) return "";
@@ -4281,14 +4160,12 @@
 		const fileName = normalizeFileName(input.fileName);
 		return fileName ? `${code}|name:${fileName}` : `${code}|name:unknown`;
 	}
-
 	function emptyPayload() {
 		return {
 			version: 1,
 			entries: {}
 		};
 	}
-
 	function normalizePayload(raw) {
 		if (!raw || typeof raw !== "object") return emptyPayload();
 		const value = raw;
@@ -4309,20 +4186,16 @@
 			entries
 		};
 	}
-
 	function isSearchResult(value) {
 		if (!value || typeof value !== "object") return false;
 		const item = value;
 		return typeof item.providerId === "string" && typeof item.sourceId === "string" && typeof item.title === "string" && typeof item.format === "string";
 	}
-
 	var AutoSearchCache = class {
 		now;
-
 		constructor(now = () => Date.now()) {
 			this.now = now;
 		}
-
 		read(key) {
 			if (!key) return null;
 			try {
@@ -4339,7 +4212,6 @@
 				return null;
 			}
 		}
-
 		write(key, results) {
 			if (!key) return;
 			try {
@@ -4351,14 +4223,11 @@
 				const ordered = Object.entries(payload.entries).sort((a, b) => b[1].savedAt - a[1].savedAt).slice(0, MAX_ENTRIES);
 				payload.entries = Object.fromEntries(ordered);
 				this.writePayload(payload);
-			} catch {
-			}
+			} catch {}
 		}
-
 		clear() {
 			writeStoredValue(AUTO_SEARCH_CACHE_KEY, emptyPayload());
 		}
-
 		writePayload(payload) {
 			writeStoredValue(AUTO_SEARCH_CACHE_KEY, payload);
 		}
@@ -4412,36 +4281,29 @@
 		let activeSearchAbort = null;
 		let searchRequestId = 0;
 		const activeDownloads = new Set();
-
 		function beginDownload() {
 			const controller = new AbortController();
 			activeDownloads.add(controller);
 			return controller;
 		}
-
 		function endDownload(controller) {
 			activeDownloads.delete(controller);
 		}
-
 		function abortActiveRequests() {
 			activeSearchAbort?.abort();
 			activeSearchAbort = null;
 			for (const controller of activeDownloads) controller.abort();
 			activeDownloads.clear();
 		}
-
 		function showWarning(message) {
 			panel.showToast(message, "warn");
 		}
-
 		function identityToken(identity) {
 			if (!identity) return "";
 			return identity.fileId ? `id:${identity.fileId}` : identity.videoKey;
 		}
-
 		let publishTimer = null;
 		let lastCacheCheckAt = 0;
-
 		function publishMetadata() {
 			if (publishTimer !== null) window.clearTimeout(publishTimer);
 			publishTimer = window.setTimeout(() => {
@@ -4449,7 +4311,6 @@
 				metadataSync.publish();
 			}, 300);
 		}
-
 		async function publishMetadataNow() {
 			if (publishTimer !== null) {
 				window.clearTimeout(publishTimer);
@@ -4529,7 +4390,6 @@
 		document.addEventListener("visibilitychange", () => {
 			if (document.visibilityState === "visible" && panel.isOpen()) refreshRemoteCache();
 		});
-
 		function applySubtitle(title, subtitleId, cues, note) {
 			controller.selectSubtitle(subtitleId, cues);
 			controller.setSubtitleVisible(true);
@@ -4540,7 +4400,6 @@
 			const suffix = note ? `（${note}）` : "";
 			panel.showToast(hasCueNow ? `已使用：${title}${suffix}` : `已使用：${title}${suffix}（当前时间点没有字幕，拖动进度条查看）`, hasCueNow ? "success" : "warn");
 		}
-
 		async function ensureCurrentParser(record) {
 			if (record.parserVersion >= 2) return record;
 			if (record.format === "ass" || record.format === "ssa") return record;
@@ -4561,7 +4420,6 @@
 				return record;
 			}
 		}
-
 		async function loadManualCode(identity) {
 			if (!identity.videoKey || manualCodeLoadedFor === identity.videoKey) return;
 			manualCodeLoadedFor = identity.videoKey;
@@ -4581,7 +4439,6 @@
 				logger.warn("读取手动番号失败", e);
 			}
 		}
-
 		async function persistManualCode(identity, code) {
 			const token = identityToken(identity);
 			const stable = await waitForStableIdentity(token, 3e3);
@@ -4594,7 +4451,6 @@
 				logger.warn("保存手动番号失败", e);
 			}
 		}
-
 		async function handleManualSearch(code) {
 			const trimmed = code.trim();
 			if (!trimmed) {
@@ -4619,7 +4475,6 @@
 				forceProviders: true
 			});
 		}
-
 		async function replaceCachedByCode(code, keepId) {
 			if (!code) return 0;
 			try {
@@ -4688,7 +4543,6 @@
 				logger.error("导入字幕失败", e);
 			}
 		}
-
 		async function handleSearch(code, origin = controller.getCurrentIdentity(), options = {}) {
 			if (!code) {
 				showWarning("请输入番号");
@@ -4716,12 +4570,10 @@
 					languagePreferences: currentSettings.preferredLanguages,
 					force: options.forceProviders,
 					signal: abort.signal
-				}, currentSettings, {
-					onProgress: (progress) => {
-						latest = progress;
-						if (stillCurrent()) panel.setProgress(progress);
-					}
-				});
+				}, currentSettings, { onProgress: (progress) => {
+					latest = progress;
+					if (stillCurrent()) panel.setProgress(progress);
+				} });
 				if (stillCurrent()) {
 					panel.setProgress({
 						...latest,
@@ -4744,7 +4596,6 @@
 				if (activeSearchAbort === abort) activeSearchAbort = null;
 			}
 		}
-
 		async function handleAutoSearch() {
 			if (!currentSettings.autoSearch) return;
 			const generation = ++autoSearchGeneration;
@@ -4758,7 +4609,7 @@
 			if (!code) return;
 			if (code === lastAutoSearchKey) return;
 			const deadline = Date.now() + 3e3;
-			for (; ;) {
+			for (;;) {
 				if (controller.getCurrentSubtitleId()) return;
 				if (await subtitleRepository.getSelectedForVideo(currentIdentity.videoKey) || controller.getCurrentSubtitleId()) return;
 				if (generation !== autoSearchGeneration || epoch !== searchEpoch) return;
@@ -4786,11 +4637,10 @@
 				return;
 			}
 			lastAutoSearchKey = code;
-			const results = await handleSearch(code, currentIdentity, {cacheResults: true});
+			const results = await handleSearch(code, currentIdentity, { cacheResults: true });
 			if (identityToken(controller.getCurrentIdentity()) !== identityToken(currentIdentity)) return;
 			if (results.length > 0) panel.showToast(`已自动搜索到 ${results.length} 条字幕，请在列表中手动选择`);
 		}
-
 		async function handleCacheMiss(identity) {
 			if (!currentSettings.autoLoadCachedSubtitle) return;
 			if (controller.getCurrentSubtitleId()) return;
@@ -4807,10 +4657,9 @@
 			if (controller.getCurrentSubtitleId()) return;
 			handleAutoSearch();
 		}
-
 		async function waitForStableIdentity(token, timeoutMs = 3e3, signal) {
 			const deadline = Date.now() + timeoutMs;
-			for (; ;) {
+			for (;;) {
 				if (signal?.aborted) return null;
 				const current = controller.getCurrentIdentity();
 				if (!current || identityToken(current) !== token) return null;
@@ -4819,7 +4668,6 @@
 				await new Promise((resolve) => window.setTimeout(resolve, 250));
 			}
 		}
-
 		async function restoreRemoteSubtitle(meta, identity, allowReplace = false) {
 			const provider = providerManager.get(meta.providerId);
 			const providerEnabled = currentSettings.providers[meta.providerId]?.enabled ?? true;
@@ -4894,7 +4742,6 @@
 				endDownload(abort);
 			}
 		}
-
 		async function handleRestoreRemote(meta) {
 			const identity = controller.getCurrentIdentity();
 			if (!identity) {
@@ -5097,23 +4944,19 @@
 			controller.setOffset(offsetMs);
 			panel.setSettings(currentSettings, false);
 		}
-
 		async function handleAutoSearchChange(enabled) {
-			currentSettings = await settingsService.update({autoSearch: enabled});
+			currentSettings = await settingsService.update({ autoSearch: enabled });
 			panel.setSettings(currentSettings, false);
 			if (enabled) {
 				lastAutoSearchKey = "";
 				handleAutoSearch();
 			}
 		}
-
 		async function handleShortcutChange(enabled) {
-			currentSettings = await settingsService.update({
-				shortcuts: {
-					...currentSettings.shortcuts,
-					enabled
-				}
-			});
+			currentSettings = await settingsService.update({ shortcuts: {
+				...currentSettings.shortcuts,
+				enabled
+			} });
 			panel.setSettings(currentSettings, false);
 		}
 		async function handleSelectCachedSubtitle(record) {
@@ -5138,7 +4981,6 @@
 				logger.error("加载缓存字幕失败", e);
 			}
 		}
-
 		async function handleDeduplicateCache() {
 			try {
 				const result = await subtitleRepository.deduplicateByCode();
@@ -5167,7 +5009,6 @@
 				logger.error("缓存去重失败", e);
 			}
 		}
-
 		async function handleExportAll() {
 			try {
 				const records = await subtitleRepository.getAll();
@@ -5191,13 +5032,11 @@
 				logger.error("导出字幕失败", e);
 			}
 		}
-
 		function handlePositioningChange(enabled) {
 			controller.setPositioningMode(enabled);
 			panel.setPositioning(enabled);
 			if (enabled) panel.showToast("拖动字幕到目标位置；按 Esc 或再次点击「完成定位」退出");
 		}
-
 		async function handleCheckProviders() {
 			const providers = providerManager.getAll().filter((provider) => provider.id !== "local");
 			const checks = await Promise.allSettled(providers.map(async (provider) => {
@@ -5224,7 +5063,6 @@
 			});
 			panel.showToast(failed.length === 0 ? `来源检测通过：${passed.join("、")}` : `可用：${passed.join("、") || "无"}；失败：${failed.join("；")}`, failed.length === 0 ? "success" : "warn");
 		}
-
 		async function handleBackfillSources() {
 			const identity = controller.getCurrentIdentity();
 			if (!identity) {
@@ -5241,7 +5079,7 @@
 				panel.showToast("当前视频没有需要补齐来源信息的缓存", "warn");
 				return;
 			}
-			const results = await handleSearch(code, identity, {forceProviders: true});
+			const results = await handleSearch(code, identity, { forceProviders: true });
 			const bySource = new Map(results.map((result) => [`${result.providerId}:${result.sourceId}`, result]));
 			let filled = 0;
 			for (const record of missing) {
@@ -5258,7 +5096,6 @@
 			if (filled > 0) publishMetadata();
 			panel.showToast(filled > 0 ? `已补齐 ${filled} 条字幕的来源信息，可在其他播放域名恢复` : "本次搜索结果中没有匹配的来源条目", filled > 0 ? "success" : "warn");
 		}
-
 		async function handleClearRemoteSync() {
 			try {
 				const origins = metadataSync.clearRemoteOrigins();
@@ -5269,7 +5106,6 @@
 				panel.showToast("清理远程同步索引失败", "warn");
 			}
 		}
-
 		async function handleRefreshSync() {
 			try {
 				await publishMetadataNow();
@@ -5302,18 +5138,15 @@
 			refreshCacheList();
 			publishMetadata();
 		}
-
 		function formatByteSize(bytes) {
 			if (bytes < 1024) return `${bytes}B`;
 			if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)}KB`;
 			return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 		}
-
 		function protectedSubtitleIds() {
 			const current = controller.getCurrentSubtitleId();
 			return current ? [current] : [];
 		}
-
 		async function handleCleanupCache() {
 			try {
 				const result = await subtitleRepository.cleanup({
@@ -5332,7 +5165,6 @@
 				panel.showToast("清理缓存失败", "warn");
 			}
 		}
-
 		async function enforceCacheLimit(force = false) {
 			const now = Date.now();
 			if (!force && now - lastCacheCheckAt < 6e4) return;
@@ -5371,7 +5203,6 @@
 			localSubtitleIds = new Set(local.map((record) => record.id));
 			refreshRemoteCache();
 		}
-
 		function refreshRemoteCache() {
 			panel.setRemoteSummary(metadataSync.getRemoteSummary());
 			const identity = controller.getCurrentIdentity();
@@ -5383,7 +5214,6 @@
 			panel.setRemoteSubtitles(remote.subtitles.filter((item) => !localSubtitleIds.has(item.id)));
 		}
 	}
-
 	var url = new URL(window.location.href);
 	if (url.searchParams.has("pickcode") || parseModernPlayerUrl(url.href) !== null) bootstrap().catch((e) => {
 		logger.error("启动失败", e);

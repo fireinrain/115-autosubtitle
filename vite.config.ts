@@ -1,5 +1,6 @@
-import { defineConfig } from "vitest/config";
+import {defineConfig} from "vitest/config";
 import monkey from "vite-plugin-monkey";
+import pkg from "./package.json" with {type: "json"};
 
 export default defineConfig({
   // 固定端口：Tampermonkey 里的开发版加载器把 dev server 地址写死在脚本里，
@@ -15,7 +16,7 @@ export default defineConfig({
       userscript: {
         name: "115 Subtitle Assistant",
         namespace: "https://example.invalid/115-subtitle-assistant",
-        version: "0.3.0",
+        version: pkg.version,
         description: "115 网页播放器字幕搜索、显示与本地缓存",
         "run-at": "document-idle",
         match: [

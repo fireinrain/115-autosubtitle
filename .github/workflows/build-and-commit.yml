@@ -2,7 +2,7 @@ name: Build and Release
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
     tags: [ 'v*' ]
     paths-ignore:
       - dist/115-subtitle-assistant.user.js
@@ -32,14 +32,15 @@ jobs:
       - name: Run lint, typecheck and tests
         run: npm run lint && npm run typecheck && npm test
 
-      - name: Run build
-        run: npm run build
-
       - name: Read version
         id: version
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "numeric=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Run build
+        run: npm run build
 
       - name: Commit and push dist
         if: github.ref_type == 'branch'
@@ -50,7 +51,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to dist, skip commit"
           else
-            git commit -m "build: update dist to ${{ steps.version.outputs.version }} [skip ci]"
+            git commit -m "build: update dist to ${{ steps.version.outputs.tag }} [skip ci]"
             git push
           fi
 

@@ -14,7 +14,6 @@ describe("DEFAULT_SETTINGS", () => {
     it("默认开启无缓存自动搜索，但不自动应用结果", () => {
         expect(DEFAULT_SETTINGS.autoSearch).toBe(true);
         expect(DEFAULT_SETTINGS.autoLoadCachedSubtitle).toBe(true);
-        expect(DEFAULT_SETTINGS.autoSelectHighConfidence).toBe(false);
     });
 });
 

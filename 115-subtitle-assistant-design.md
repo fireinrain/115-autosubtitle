@@ -169,7 +169,7 @@ flowchart TD
 // ==UserScript==
 // @name         115 Subtitle Assistant
 // @namespace    https://example.invalid/115-subtitle-assistant
-// @version      0.1.0
+// @version      0.3.0
 // @description  115 网页播放器字幕搜索、显示与本地缓存
 // @run-at       document-idle
 // @match        https://115.com/*
@@ -179,6 +179,8 @@ flowchart TD
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
 // @connect      subtitle-provider.example
 // ==/UserScript==
 ```
@@ -907,7 +909,7 @@ Overlay 必须：
 
 ### 12.2 数据库
 
-数据库名：`115SubtitleAssistantDB`。初始版本 `1`。
+数据库名：`115SubtitleAssistantDB`。当前版本 `2`。
 
 建议 Store：
 
@@ -931,9 +933,15 @@ Overlay 必须：
 | `createdAt` | number | 创建时间 |
 | `lastUsedAt` | number | 最后使用时间 |
 | `parserVersion` | number | 解析器版本 |
-| `isFavorite` | boolean | 是否收藏 |
 
 索引建议：`videoKey`、`code`、`providerId`、`lastUsedAt`、`checksum`。
+
+#### `subtitleMeta`
+
+不含 `rawBlob` 与 `cues` 的纯元数据投影，供跨播放域名同步和统计读取。字段与 `subtitles` 的元数据部分一致，
+额外保存 `size`（原始文件字节数）与 `sourceResult`（在线来源重新下载快照）。索引：`videoKey`、`code`、`providerId`、`lastUsedAt`、
+`checksum`。
+v1 → v2 升级时从 `subtitles` 逐条投影，不删除原记录。
 
 #### `videoRecords`
 
@@ -984,7 +992,7 @@ export interface SubtitleRecord {
   createdAt: number;
   lastUsedAt: number;
   parserVersion: number;
-  isFavorite: boolean;
+  sourceResult?: SubtitleSearchResult;
 }
 ```
 
@@ -1003,8 +1011,8 @@ export interface SubtitleRecord {
 
 - 软容量上限：200 MB，可配置。
 - 缓存保留：不设置必须到期时间；提供“超过 90 天未使用可清理”的建议策略。
-- LRU：优先清理长时间未使用且非收藏、非当前选中的字幕。
-- 收藏字幕和当前视频使用中的字幕不自动清理。
+- LRU：优先清理长时间未使用且非当前选中的字幕。
+- 当前视频使用中的字幕不自动清理。
 - 单个字幕文件大小限制：建议默认 20 MB，可配置。
 
 容量不是绝对上限，浏览器实际可用额度受设备和浏览器策略影响。可通过 `navigator.storage.estimate()` 查询估算值；如使用 `navigator.storage.persist()`，必须把结果视为浏览器授权情况而非永久保证。
@@ -1014,7 +1022,8 @@ export interface SubtitleRecord {
 - 所有升级使用版本号和明确 migration。
 - 不在数据库升级时静默删除用户字幕。
 - 迁移前尽量保证事务原子性。
-- `parserVersion` 变化不一定要重下载原始字幕，可从 `rawBlob` 重新解析。
+- `parserVersion` 低于当前 `PARSER_VERSION` 时，从 `rawBlob` 按需重新解析并写回 Cues/parserVersion；失败保留原记录。
+- v2 增加 `subtitleMeta` store 并从 v1 的 `subtitles` 投影；升级不删除任何字幕。
 - 数据库损坏时提供清理数据库和重新导入的恢复入口。
 
 ### 12.7 缓存去重
@@ -1038,7 +1047,8 @@ export interface SubtitleRecord {
   `{ version, buckets: { [origin]: { updatedAt, subtitles, videos } } }`。
 - 每个 origin 只覆盖自己的 bucket；启动时以及每次缓存变更（保存、删除、清空、去重、切换选中）后发布。
 -
-字幕元数据包含：id、videoKey、code、providerId、sourceId、title、language、format、cueCount、checksum、size、createdAt、lastUsedAt、isFavorite、sourceResult。
+
+字幕元数据包含：id、videoKey、code、providerId、sourceId、title、language、format、cueCount、checksum、size、createdAt、lastUsedAt、sourceResult。
 - `sourceResult` 只保留重新下载所需字段（providerId、sourceId、title、format、downloadUrl 等），不包含 Blob、Cues 或匹配说明。
 - 视频元数据包含：videoKey、code、selectedSubtitleId、offsetMs、subtitleEnabled、updatedAt。
 - 读取 GM 数据时逐字段校验；坏数据只丢弃对应条目，不让整个同步功能失效。
@@ -1050,9 +1060,11 @@ export interface SubtitleRecord {
 
 限制：
 
-- 旧缓存记录在加入该功能前没有 `sourceResult`，只能显示为不可恢复；重新从在线来源使用一次后才会具备恢复能力。
+- 旧缓存记录可通过「补齐来源信息」按 `providerId + sourceId` 精确回填 `sourceResult`；重新从在线来源使用一次也会自动补写。
 - 下载地址可能过期或来源下线，恢复失败时回退到自动搜索。
-- 两个域名的选中状态可能不一致（例如某域名刚替换了同番号字幕）；跨域恢复以另一域名的选中项为准。
+- 跨域选中冲突以视频记录的 `updatedAt` 最新者为准；本地已有选中时仍以本地为准。
+- 使用 `GM_addValueChangeListener` 做跨页面事件推送；不可用时保留面板打开时的 15s 轮询。
+- 缓存页支持「清理远程索引」，只删除其他 origin 的 GM bucket，不删除 IndexedDB 字幕。
 - 开发模式下 GM 存储不可用，会回退到按 origin 隔离的 localStorage，无法跨域同步。
 
 ---
@@ -1066,7 +1078,6 @@ export interface GlobalSettings {
   enabled: boolean;
   autoSearch: boolean;
   autoLoadCachedSubtitle: boolean;
-  autoSelectHighConfidence: boolean;
   preferredLanguages: string[];
   defaultFormatOrder: SubtitleFormat[];
   style: SubtitleStyleSettings;
@@ -1083,13 +1094,12 @@ export interface GlobalSettings {
 ```typescript
 export const DEFAULT_SETTINGS: GlobalSettings = {
   enabled: true,
-  autoSearch: false,
+  autoSearch: true,
   autoLoadCachedSubtitle: true,
-  autoSelectHighConfidence: false,
   preferredLanguages: ["zh-CN", "zh-TW", "en"],
   defaultFormatOrder: ["srt", "vtt", "ass", "ssa"],
   style: {
-    fontFamily: "Arial, sans-serif",
+    fontFamily: DEFAULT_SUBTITLE_FONT,
     fontSize: 32,
     fontWeight: 600,
     color: "#FFFFFF",
@@ -1194,7 +1204,6 @@ export const DEFAULT_SETTINGS: GlobalSettings = {
 - 占用空间估算。
 - 按视频删除。
 - 按字幕删除。
-- 收藏。
 - 清理未使用缓存。
 - 清空全部缓存（必须二次确认）。
 
@@ -1367,7 +1376,6 @@ export type SubtitleErrorCode =
 │   │   ├── player-adapter.ts
 │   │   ├── player-controller.ts
 │   │   ├── player-observer.ts
-│   │   ├── generic-video-adapter.ts
 │   │   └── adapter-115.ts
 │   ├── identity/
 │   │   ├── video-identity.ts
@@ -1596,7 +1604,7 @@ OverlayRenderer 不访问 `video.currentTime`，时间由 TimelineEngine 提供�
 - Chrome + Tampermonkey。
 - Edge + Tampermonkey。
 
-后续根据用户需求测试 Firefox/Violentmonkey。不同脚本管理器的 GM API 行为可能不同，应通过 NetworkAdapter 兼容层隔离。
+当前兼容性范围以 Chrome + Tampermonkey 为准；Firefox / Violentmonkey 不在当前需求范围内。
 
 ### 20.4 测试数据
 
@@ -1685,7 +1693,7 @@ OverlayRenderer 不访问 `video.currentTime`，时间由 TimelineEngine 提供�
 2. 添加字幕拖动定位。
 3. 添加延迟调整和快捷键。
 4. 添加按视频覆盖设置。
-5. 添加搜索历史、收藏和结果反馈。
+5. 添加搜索历史和结果反馈。
 6. 添加缓存清理策略。
 
 验收：样式设置可保存；用户可以按视频保存偏移；缓存可查看、删除和清理。
@@ -1735,16 +1743,16 @@ OverlayRenderer 不访问 `video.currentTime`，时间由 TimelineEngine 提供�
 
 ### 22.3 推荐版本
 
-| 版本 | 主要内容 |
-|---|---|
-| 0.1.0 | 播放器检测 + 本地 SRT + 自定义字幕覆盖 |
+| 版本    | 主要内容                           |
+|-------|--------------------------------|
+| 0.1.0 | 播放器检测 + 本地 SRT + 自定义字幕覆盖       |
 | 0.2.0 | 番号识别 + videoKey + IndexedDB 缓存 |
-| 0.3.0 | Provider 框架 + 第一个在线字幕来源 |
-| 0.4.0 | 多来源搜索 + 评分、去重、语言筛选 |
-| 0.5.0 | 完整样式面板 + 位置拖动 + 时间偏移 |
-| 0.6.0 | VTT、搜索历史、收藏和缓存管理 |
-| 0.7.0 | ASS/SSA 基础兼容或完整渲染评估 |
-| 1.0.0 | 稳定版、文档、升级迁移与完整验收 |
+| 0.3.0 | Provider 框架 + 第一个在线字幕来源        |
+| 0.4.0 | 多来源搜索 + 评分、去重、语言筛选             |
+| 0.5.0 | 完整样式面板 + 位置拖动 + 时间偏移           |
+| 0.6.0 | VTT、搜索历史和缓存管理                  |
+| 0.7.0 | ASS/SSA 基础兼容或完整渲染评估            |
+| 1.0.0 | 稳定版、文档、升级迁移与完整验收               |
 
 ---
 
@@ -1923,7 +1931,6 @@ export interface SubtitleRecord {
   createdAt: number;
   lastUsedAt: number;
   parserVersion: number;
-  isFavorite: boolean;
 }
 
 export interface VideoRecord {
@@ -2052,23 +2059,23 @@ AI 应按以下顺序执行，不得直接跳到在线字幕网站爬取：
 ## D.1 已实现能力
 
 - 旧播放页 `115vod.com` 与新播放页 `115.com/players/video/*` 的播放器发现、CC 入口和 overlay。
-- 番号自动识别、手动输入查询、迅雷/SubtitleCat 搜索、评分排序与去重。
+- 番号自动识别、手动番号修正持久化、迅雷/SubtitleCat 搜索、评分排序与去重。
+- 在线结果匹配原因悬停提示；搜索/下载在切换视频时自动取消；下载重定向最终域名校验。
 - SRT/VTT 解析、时间轴同步、样式与偏移、字幕预览和单文件下载。
 - IndexedDB 缓存、跨视频隔离、选中恢复、同番号自动替换、手动去重、ZIP 导出。
-- 无缓存自动搜索（只提示，不自动应用）。
-- GM 跨播放域名缓存元数据同步；可下载来源支持跨域自动恢复。
+- 按天清理、超过容量上限自动清理（当前播放字幕受保护）。
+- 字幕快捷键（Alt+, / Alt+. / Alt+0 / Alt+C），输入框内自动禁用。
+- 无缓存自动搜索（只提示，不自动应用），自动搜索带 15 分钟 TTL 缓存；手动搜索始终重新请求。
+- GM 跨播放域名缓存元数据同步；可下载来源支持跨域自动恢复；支持 `GM_addValueChangeListener` 事件推送、手动刷新、清理远程索引和旧记录来源补齐。
 - 视频切换清理、搜索代次隔离、metadata 就绪门控、网页全屏下 CC/overlay 保留。
+- 字幕拖动定位；面板 ARIA/键盘导航/非阻塞确认与 toast；来源健康检查；网络层并发/频率限制与一次退避重试。
+- IndexedDB v2：`subtitleMeta` 纯元数据 store、v1 自动迁移、`parserVersion` 按需重解析。
 
 ## D.2 尚未实现或待验证
 
 - ASS/SSA 不解析：只识别格式并返回不支持错误（作为已知限制，不再列入优化清单）。
-- 手动番号持久化（`codeSource` 未写入 `manual`）。
-- 缓存容量上限、按天清理、收藏保护与相关 UI。
-- 字幕拖动定位、快捷键、匹配原因展示。
-- 原生「桌面全屏」验证与 `<video>` 全屏 fallback。
-- 搜索/下载在视频切换时的主动取消、下载重定向最终域名校验。
-- 跨域元数据的实时刷新、手动刷新入口、旧记录 `sourceResult` 补齐。
-- Firefox / Violentmonkey 兼容性未验证。
+- 原生「桌面全屏」验证与 `<video>` 全屏 fallback；目前已能检测 overlay 不在全屏子树时提示，尚未实现 TextTrack 回退。
+- 移动端/窄视口仍需真实浏览器手工验收（已加窄屏 CSS 与键盘 ARIA）。
 
 ## D.3 文档入口
 

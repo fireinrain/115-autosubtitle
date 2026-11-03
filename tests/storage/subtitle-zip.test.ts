@@ -18,7 +18,6 @@ function makeRecord(over: Partial<SubtitleRecord> = {}): SubtitleRecord {
         createdAt: Date.now(),
         lastUsedAt: Date.now(),
         parserVersion: 1,
-        isFavorite: false,
         ...over,
     };
 }

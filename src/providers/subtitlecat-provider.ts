@@ -11,6 +11,7 @@ import { SubtitleError } from "../utils/errors";
 import { computeChecksum } from "../utils/hash";
 
 const BASE_URL = "https://www.subtitlecat.com";
+const ALLOWED_HOSTS = ["www.subtitlecat.com"];
 const MAX_CANDIDATES = 20;
 const MAX_CONCURRENT_DETAIL = 5;
 
@@ -40,6 +41,8 @@ export class SubtitleCatProvider implements SubtitleProvider {
         responseType: "text",
         timeoutMs: 15000,
         signal: query.signal,
+          allowedHosts: ALLOWED_HOSTS,
+          retry: 1,
       });
 
       const candidates = this.parseSearchHtml(resp.body, keyword);
@@ -58,6 +61,22 @@ export class SubtitleCatProvider implements SubtitleProvider {
       throw new SubtitleError("PROVIDER_NETWORK_ERROR", "SubtitleCat 搜索失败", e);
     }
   }
+
+    async healthCheck(): Promise<{ ok: boolean; message?: string }> {
+        try {
+            await gmRequestClient.request<string>({
+                url: `${BASE_URL}/`,
+                method: "GET",
+                responseType: "text",
+                timeoutMs: 10000,
+                allowedHosts: ALLOWED_HOSTS,
+                retry: 1,
+            });
+            return {ok: true};
+        } catch (e) {
+            return {ok: false, message: e instanceof Error ? e.message : "SubtitleCat 不可用"};
+        }
+    }
 
   async download(result: SubtitleSearchResult, signal?: AbortSignal): Promise<SubtitleDownload> {
     if (!result.downloadUrl) {
@@ -79,6 +98,8 @@ export class SubtitleCatProvider implements SubtitleProvider {
         timeoutMs: 30000,
         signal,
         maxBytes: 5 * 1024 * 1024,
+          allowedHosts: ALLOWED_HOSTS,
+          retry: 1,
       });
 
         // SubtitleCat 的搜索结果标题通常不带扩展名（如 `DVAJ-758.zh-cn(by transub)`），
@@ -163,6 +184,7 @@ export class SubtitleCatProvider implements SubtitleProvider {
       responseType: "text",
       timeoutMs: 15000,
       signal,
+        allowedHosts: ALLOWED_HOSTS,
     });
 
     const doc = new DOMParser().parseFromString(resp.body, "text/html");

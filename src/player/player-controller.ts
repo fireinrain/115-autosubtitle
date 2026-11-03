@@ -5,9 +5,9 @@ import { SubtitleTimelineEngine } from "../subtitle/timeline-engine";
 import { OverlayRenderer } from "../renderer/overlay-renderer";
 import { subtitleRepository } from "../storage/subtitle-repository";
 import type { SubtitleCue } from "../subtitle/subtitle-model";
+import type {SubtitleRecord} from "../storage/database";
 import type { GlobalSettings } from "../settings/settings-service";
 import { isFiniteNumber } from "../utils/number";
-import { logger } from "../utils/logger";
 
 export interface PlayerControllerEvents {
   onVideoChange?: (identity: VideoIdentity) => void;
@@ -16,6 +16,12 @@ export interface PlayerControllerEvents {
   onSubtitleCleared?: () => void;
     /** 缓存恢复流程结束（无论是否命中），供上层决定是否自动搜索。 */
     onCacheRestoreSettled?: (identity: VideoIdentity, restored: boolean) => void;
+    /** 拖动字幕定位结束，参数为相对播放器容器的百分比。 */
+    onPositionChange?: (xPercent: number, yPercent: number) => void;
+    /** 当前全屏元素无法包含 overlay 时通知上层。 */
+    onOverlayUnsupported?: (reason: string) => void;
+    /** 解析器升级后重新解析缓存字幕；返回 null 时回退使用原记录。 */
+    resolveCachedSubtitle?: (record: SubtitleRecord) => Promise<SubtitleRecord | null>;
 }
 
 export class PlayerController {
@@ -49,9 +55,26 @@ export class PlayerController {
 
   start(): void {
     this.stopObserving = this.adapter.observe((ctx) => this.handleContext(ctx));
+      document.addEventListener("fullscreenchange", this.handleFullscreenChange);
     const initial = this.adapter.detect();
     if (initial) this.handleContext(initial);
   }
+
+    /**
+     * 原生全屏元素如果是 `<video>` 本身，overlay 作为兄弟节点不会被合成到全屏层。
+     * 这里不猜测 115 的全屏实现，只在真实 fullscreenElement 不包含 overlayHost 时提示。
+     */
+    private handleFullscreenChange = (): void => {
+        const fullscreen = document.fullscreenElement;
+        const context = this.currentContext;
+        if (!fullscreen || !context) return;
+        if (fullscreen === context.overlayHost || fullscreen.contains(context.overlayHost)) return;
+        this.events.onOverlayUnsupported?.(
+            fullscreen === context.video
+                ? "当前为 video 原生全屏，自定义字幕层不会显示"
+                : "当前全屏元素不包含字幕层",
+        );
+    };
 
   private handleContext(ctx: PlayerContext | null): void {
     if (!ctx) {
@@ -106,9 +129,12 @@ export class PlayerController {
           this.events.onCacheRestoreSettled?.(identity, Boolean(cached));
           return;
       }
-    this.currentSubtitleId = cached.id;
-    this.loadCues(cached.cues);
-    this.events.onSubtitleLoaded?.(cached.title, cached.id);
+      const resolved = await this.events.resolveCachedSubtitle?.(cached);
+      if (gen !== this.generation || this.currentSubtitleId) return;
+      const loaded = resolved ?? cached;
+      this.currentSubtitleId = loaded.id;
+      this.loadCues(loaded.cues);
+      this.events.onSubtitleLoaded?.(loaded.title, loaded.id);
       this.events.onCacheRestoreSettled?.(identity, true);
   }
 
@@ -154,6 +180,7 @@ export class PlayerController {
     this.unbindVideoEvents();
     this.timeline.clear();
     this.renderer.setCues([]);
+      this.renderer.setPositioningMode(false);
     this.renderer.unmount();
     this.currentSubtitleId = null;
     this.currentContext = null;
@@ -253,6 +280,17 @@ export class PlayerController {
     this.renderer.setVisible(visible);
   }
 
+    /** 进入/退出字幕拖动定位模式。 */
+    setPositioningMode(enabled: boolean): void {
+        this.renderer.setPositioningMode(enabled, (xPercent, yPercent) => {
+            this.events.onPositionChange?.(xPercent, yPercent);
+        });
+    }
+
+    isPositioningMode(): boolean {
+        return this.renderer.isPositioningMode();
+    }
+
   getSubtitleVisible(): boolean {
     return this.subtitleVisible;
   }
@@ -298,6 +336,7 @@ export class PlayerController {
   }
 
   dispose(): void {
+      document.removeEventListener("fullscreenchange", this.handleFullscreenChange);
     this.stopObserving?.();
     void this.detach();
   }

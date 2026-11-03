@@ -2,6 +2,8 @@ import type { ParsedSubtitle, SubtitleCue, SubtitleFormat, SubtitleSegment } fro
 import { encodingDetector } from "./encoding-detector";
 import { SubtitleError } from "../utils/errors";
 
+export const PARSER_VERSION = 2;
+
 export interface SubtitleParser {
   readonly format: SubtitleFormat;
   parse(bytes: ArrayBuffer, encoding?: string): ParsedSubtitle;

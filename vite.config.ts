@@ -15,7 +15,7 @@ export default defineConfig({
       userscript: {
         name: "115 Subtitle Assistant",
         namespace: "https://example.invalid/115-subtitle-assistant",
-        version: "0.1.0",
+        version: "0.3.0",
         description: "115 网页播放器字幕搜索、显示与本地缓存",
         "run-at": "document-idle",
         match: [
@@ -28,6 +28,8 @@ export default defineConfig({
           "GM_xmlhttpRequest",
           "GM_registerMenuCommand",
           "GM_addStyle",
+          "GM_addValueChangeListener",
+          "GM_removeValueChangeListener",
         ],
         connect: [
           "api-shoulei-ssl.xunlei.com",

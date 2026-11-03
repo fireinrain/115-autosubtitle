@@ -11,6 +11,7 @@ import { SubtitleError } from "../utils/errors";
 import { computeChecksum } from "../utils/hash";
 
 const SEARCH_ENDPOINT = "https://api-shoulei-ssl.xunlei.com/oracle/subtitle";
+const SEARCH_HOST = "api-shoulei-ssl.xunlei.com";
 const DOWNLOAD_HOST = "subtitle.v.geilijiasu.com";
 const SUPPORTED_FORMATS: SubtitleFormat[] = ["srt", "ass", "ssa"];
 
@@ -57,6 +58,8 @@ export class XunleiProvider implements SubtitleProvider {
         responseType: "text",
         timeoutMs: 15000,
         signal: query.signal,
+          allowedHosts: [SEARCH_HOST],
+          retry: 1,
       });
 
       const data = JSON.parse(resp.body) as XunleiResponse;
@@ -106,6 +109,24 @@ export class XunleiProvider implements SubtitleProvider {
     }
   }
 
+    async healthCheck(): Promise<{ ok: boolean; message?: string }> {
+        try {
+            const url = new URL(SEARCH_ENDPOINT);
+            url.searchParams.set("name", "test");
+            await gmRequestClient.request<string>({
+                url: url.toString(),
+                method: "GET",
+                responseType: "text",
+                timeoutMs: 10000,
+                allowedHosts: [SEARCH_HOST],
+                retry: 1,
+            });
+            return {ok: true};
+        } catch (e) {
+            return {ok: false, message: e instanceof Error ? e.message : "迅雷字幕不可用"};
+        }
+    }
+
   async download(result: SubtitleSearchResult, signal?: AbortSignal): Promise<SubtitleDownload> {
     if (!result.downloadUrl) {
       throw new SubtitleError("DOWNLOAD_FAILED", "缺少下载地址");
@@ -126,6 +147,8 @@ export class XunleiProvider implements SubtitleProvider {
         timeoutMs: 30000,
         signal,
         maxBytes: 5 * 1024 * 1024,
+          allowedHosts: [DOWNLOAD_HOST],
+          retry: 1,
       });
 
       const fileName = result.title || `subtitle.${result.format}`;

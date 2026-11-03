@@ -185,12 +185,18 @@ export class M115VideoAdapter implements PlayerAdapter {
     }
 
       const activeItem = document.querySelector<HTMLElement>(
-          "#js-video_list li.hover[pickcode], #js-video_list li[pickcode]",
+          "#js-video_list li.hover[pickcode]",
       );
     if (activeItem) {
       const pc = activeItem.getAttribute(PICKCODE_PARAM);
       if (pc) return pc;
     }
+
+      // 列表里只有一个文件时才允许无 hover 回退；多个文件时猜第一个会拿到错误身份。
+      const items = document.querySelectorAll<HTMLElement>("#js-video_list li[pickcode]");
+      if (items.length === 1) {
+          return items[0].getAttribute(PICKCODE_PARAM) ?? undefined;
+      }
 
     return undefined;
   }
@@ -205,11 +211,12 @@ export class M115VideoAdapter implements PlayerAdapter {
       scheduleDetect();
     });
 
+      // 只观察节点增删：播放器初始化/切换会替换 video 或标题节点。
+      // class/style/src 的高频属性变化交给媒体事件（loadstart/loadedmetadata）
+      // 与全屏事件处理，避免播放进度导致 300ms 一次的整页无效探测。
     observer.observe(document.body, {
       childList: true,
       subtree: true,
-      attributes: true,
-      attributeFilter: ["class", "style", "src"],
     });
 
     const onFullscreenChange = () => scheduleDetect();

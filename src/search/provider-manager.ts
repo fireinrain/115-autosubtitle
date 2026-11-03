@@ -1,10 +1,9 @@
-import type { SubtitleProvider, SubtitleSearchQuery, SubtitleSearchResult } from "../providers/provider";
+import type {SubtitleProvider, SubtitleSearchResult} from "../providers/provider";
 import { localFileProvider } from "../providers/local-provider";
 import { xunleiProvider } from "../providers/xunlei-provider";
 import { subtitleCatProvider } from "../providers/subtitlecat-provider";
 import type { GlobalSettings } from "../settings/settings-service";
-import { logger } from "../utils/logger";
-import {SubtitleError, type SubtitleErrorCode} from "../utils/errors";
+import type {SubtitleErrorCode} from "../utils/errors";
 
 export type ProviderStatus = "pending" | "searching" | "success" | "no-results" | "error" | "timeout";
 

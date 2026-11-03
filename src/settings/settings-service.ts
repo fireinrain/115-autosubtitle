@@ -43,7 +43,6 @@ export interface GlobalSettings {
   enabled: boolean;
   autoSearch: boolean;
   autoLoadCachedSubtitle: boolean;
-  autoSelectHighConfidence: boolean;
   preferredLanguages: string[];
   defaultFormatOrder: SubtitleFormat[];
   style: SubtitleStyleSettings;
@@ -62,7 +61,6 @@ export const DEFAULT_SETTINGS: GlobalSettings = {
     // 先恢复缓存；没有缓存时自动搜索并提示结果，但绝不自动应用第一条。
     autoSearch: true,
   autoLoadCachedSubtitle: true,
-  autoSelectHighConfidence: false,
   preferredLanguages: ["zh-CN", "zh-TW", "en"],
   defaultFormatOrder: ["srt", "vtt", "ass", "ssa"],
   style: {

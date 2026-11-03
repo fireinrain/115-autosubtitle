@@ -1,5 +1,5 @@
-import {describe, expect, it} from "vitest";
-import {parseModernPlayerUrl} from "../../src/player/m115-video-adapter";
+import {afterEach, beforeEach, describe, expect, it} from "vitest";
+import {M115VideoAdapter, parseModernPlayerUrl} from "../../src/player/m115-video-adapter";
 import {VideoIdentityService} from "../../src/identity/video-identity";
 
 const URL_UNDER_TEST =
@@ -38,5 +38,47 @@ describe("parseModernPlayerUrl", () => {
         expect(identity.code).toBe("SNOS-392");
         expect(identity.videoKey).toBe("id:e5exo0rcveo9ozlcb|dur:8868");
         expect(identity.confidence).toBe("strong");
+    });
+});
+
+describe("M115VideoAdapter legacy fileId fallback", () => {
+    const adapter = new M115VideoAdapter();
+
+    beforeEach(() => {
+        document.body.innerHTML = "";
+        history.replaceState({}, "", "/");
+    });
+
+    afterEach(() => {
+        document.body.innerHTML = "";
+    });
+
+    function renderPlaylist(items: Array<{ pickcode: string; hover?: boolean }>): void {
+        document.body.innerHTML = `
+      <div id="js-video_box"><video id="js-video"></video></div>
+      <ul id="js-video_list">
+        ${items
+            .map(
+                (item) =>
+                    `<li pickcode="${item.pickcode}"${item.hover ? ' class="hover"' : ""}></li>`,
+            )
+            .join("")}
+      </ul>
+    `;
+    }
+
+    it("优先使用 hover 的播放列表项", () => {
+        renderPlaylist([{pickcode: "first"}, {pickcode: "active", hover: true}]);
+        expect(adapter.detect()?.metadata.fileId).toBe("active");
+    });
+
+    it("多个列表项且没有 hover 时不猜第一个", () => {
+        renderPlaylist([{pickcode: "first"}, {pickcode: "second"}]);
+        expect(adapter.detect()?.metadata.fileId).toBeUndefined();
+    });
+
+    it("只有一个列表项时允许回退", () => {
+        renderPlaylist([{pickcode: "only"}]);
+        expect(adapter.detect()?.metadata.fileId).toBe("only");
     });
 });

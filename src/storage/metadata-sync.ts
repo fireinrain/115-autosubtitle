@@ -1,6 +1,6 @@
 import type {SubtitleFormat} from "../subtitle/subtitle-model";
 import type {SubtitleSearchResult} from "../providers/provider";
-import type {SubtitleRecord, VideoRecord} from "./database";
+import type {SubtitleMeta, SubtitleRecord, VideoRecord} from "./database";
 import {subtitleRepository} from "./subtitle-repository";
 import {readStoredValue, writeStoredValue} from "./gm-storage";
 import {isFiniteNumber} from "../utils/number";
@@ -37,7 +37,6 @@ export interface SyncedSubtitleMeta {
     size: number;
     createdAt: number;
     lastUsedAt: number;
-    isFavorite: boolean;
     /** 在线来源的搜索结果快照，用于在另一个播放域名重新下载。 */
     sourceResult?: SubtitleSearchResult;
 }
@@ -109,7 +108,13 @@ function sanitizeSourceResult(result?: SubtitleSearchResult): SubtitleSearchResu
     };
 }
 
-function toSyncedSubtitle(record: SubtitleRecord): SyncedSubtitleMeta {
+type SyncableSubtitle = SubtitleRecord | SubtitleMeta;
+
+function subtitleSize(record: SyncableSubtitle): number {
+    return "size" in record ? record.size : record.rawBlob?.size ?? 0;
+}
+
+function toSyncedSubtitle(record: SyncableSubtitle): SyncedSubtitleMeta {
     return {
         id: record.id,
         videoKey: record.videoKey,
@@ -121,10 +126,9 @@ function toSyncedSubtitle(record: SubtitleRecord): SyncedSubtitleMeta {
         format: record.format,
         cueCount: record.cueCount,
         checksum: record.checksum,
-        size: record.rawBlob?.size ?? 0,
+        size: subtitleSize(record),
         createdAt: record.createdAt,
         lastUsedAt: record.lastUsedAt,
-        isFavorite: record.isFavorite,
         sourceResult: sanitizeSourceResult(record.sourceResult),
     };
 }
@@ -142,7 +146,7 @@ function toSyncedVideo(record: VideoRecord): SyncedVideoMeta {
 
 /** 构造单个播放域名的同步快照（导出以便单测）。 */
 export function buildSyncBucket(
-    subtitles: SubtitleRecord[],
+    subtitles: SyncableSubtitle[],
     videos: VideoRecord[],
 ): SyncBucket {
     return {
@@ -217,7 +221,6 @@ function normalizeSubtitle(value: unknown): SyncedSubtitleMeta | null {
         size: asNumber(value.size),
         createdAt: asNumber(value.createdAt),
         lastUsedAt: asNumber(value.lastUsedAt),
-        isFavorite: value.isFavorite === true,
         sourceResult: normalizeSourceResult(value.sourceResult),
     };
 }
@@ -277,7 +280,7 @@ export class MetadataSyncService {
     async publish(): Promise<void> {
         try {
             const [subtitles, videos] = await Promise.all([
-                subtitleRepository.getAll(),
+                subtitleRepository.getAllMetadata(),
                 subtitleRepository.getAllVideoRecords(),
             ]);
             const payload = this.readPayload();
@@ -296,6 +299,7 @@ export class MetadataSyncService {
         const payload = this.readPayload();
         const byId = new Map<string, RemoteSubtitleMeta>();
         let selected: RemoteSubtitleMeta | null = null;
+        let selectedUpdatedAt = -1;
 
         for (const [origin, bucket] of Object.entries(payload.buckets)) {
             if (origin === this.origin) continue;
@@ -315,8 +319,11 @@ export class MetadataSyncService {
                 if (!matchesVideo(video.videoKey, videoKey, fileId)) continue;
                 const sub = subtitles.find((item) => item.id === video.selectedSubtitleId);
                 if (!sub) continue;
-                if (!selected || sub.lastUsedAt > selected.lastUsedAt) {
+                // 以「视频记录的选中状态更新时间」为准，而不是字幕最后使用时间：
+                // 同一字幕可能被另一个视频使用得更晚，但当前视频的选中状态可能更旧。
+                if (video.updatedAt > selectedUpdatedAt) {
                     selected = {...sub, origin};
+                    selectedUpdatedAt = video.updatedAt;
                 }
             }
         }
@@ -347,6 +354,52 @@ export class MetadataSyncService {
         }
 
         return {count, bytes, origins};
+    }
+
+    /**
+     * 删除其他播放域名的同步 bucket。
+     *
+     * 只清理共享索引，不删除任何 IndexedDB 字幕或选中状态；返回被清理的 origin，
+     * 便于 UI 给出明确反馈。
+     */
+    clearRemoteOrigins(): string[] {
+        const payload = this.readPayload();
+        const removed: string[] = [];
+        for (const origin of Object.keys(payload.buckets)) {
+            if (origin === this.origin) continue;
+            delete payload.buckets[origin];
+            removed.push(origin);
+        }
+        if (removed.length > 0) writeStoredValue(SYNC_KEY, payload);
+        return removed;
+    }
+
+    /**
+     * 监听共享 GM 存储的变化。只有其他标签页/域名写入时才触发（remote=true），
+     * 当前页面自己的 publish 不会回调，避免自激刷新。
+     */
+    watch(callback: () => void): () => void {
+        if (typeof GM_addValueChangeListener !== "function") return () => undefined;
+        try {
+            const listenerId = GM_addValueChangeListener(
+                SYNC_KEY,
+                (_name: string, _oldValue?: unknown, _newValue?: unknown, remote?: boolean) => {
+                    if (remote) callback();
+                },
+            );
+            return () => {
+                try {
+                    if (typeof GM_removeValueChangeListener === "function") {
+                        GM_removeValueChangeListener(listenerId);
+                    }
+                } catch {
+                    // 监听器已随页面销毁时忽略。
+                }
+            };
+        } catch (e) {
+            logger.warn("注册 GM 存储变化监听失败，将使用轮询", e);
+            return () => undefined;
+        }
     }
 
     private readPayload(): SyncPayload {

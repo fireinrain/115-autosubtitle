@@ -1,4 +1,4 @@
-import { database, type SubtitleRecord, type VideoRecord } from "./database";
+import {database, toSubtitleMeta, type SubtitleMeta, type SubtitleRecord, type VideoRecord} from "./database";
 import { SubtitleError } from "../utils/errors";
 
 export interface DeduplicateResult {
@@ -10,6 +10,22 @@ export interface DeduplicateResult {
     groups: number;
 }
 
+export interface CleanupOptions {
+    /** 容量上限（字节）；<=0 表示不按容量清理。 */
+    maxBytes: number;
+    /** 清理超过多少天未使用的记录；<=0 表示不按时间清理。 */
+    olderThanDays: number;
+    /** 额外需要保护的记录 ID（如当前正在播放的字幕）。 */
+    protectIds?: Iterable<string>;
+    now?: number;
+}
+
+export interface CleanupResult {
+    removed: number;
+    freedBytes: number;
+    totalBytes: number;
+}
+
 /** 番号归一化：去空白、统一大写，避免 `abc-123` 与 `ABC 123` 被当成两组。 */
 function normalizeCode(code: string): string {
     return code.trim().toUpperCase().replace(/\s+/g, "");
@@ -18,8 +34,9 @@ function normalizeCode(code: string): string {
 export class SubtitleRepository {
   async save(record: SubtitleRecord): Promise<void> {
     try {
-      const { tx, stores } = await database.transaction("subtitles", "readwrite");
+        const {tx, stores} = await database.transaction(["subtitles", "subtitleMeta"], "readwrite");
       stores.subtitles.put(record);
+        stores.subtitleMeta.put(toSubtitleMeta(record));
       await this.waitForTransaction(tx);
     } catch (e) {
       if (e instanceof DOMException && e.name === "QuotaExceededError") {
@@ -73,8 +90,9 @@ export class SubtitleRepository {
     }
 
   async delete(id: string): Promise<void> {
-    const { tx, stores } = await database.transaction(["subtitles", "videoRecords"], "readwrite");
+      const {tx, stores} = await database.transaction(["subtitles", "subtitleMeta", "videoRecords"], "readwrite");
     stores.subtitles.delete(id);
+      stores.subtitleMeta.delete(id);
 
     const idx = stores.videoRecords.index("lastPlayedAt");
     const allReq = idx.getAll();
@@ -101,6 +119,14 @@ export class SubtitleRepository {
     await this.waitForTransaction(tx);
     return (req.result as SubtitleRecord[]) ?? [];
   }
+
+    /** 只读取纯元数据，不加载 Blob/Cues；用于跨播放域名同步和统计。 */
+    async getAllMetadata(): Promise<SubtitleMeta[]> {
+        const {tx, stores} = await database.transaction("subtitleMeta", "readonly");
+        const req = stores.subtitleMeta.getAll();
+        await this.waitForTransaction(tx);
+        return (req.result as SubtitleMeta[]) ?? [];
+    }
 
     /**
      * 按番号去重：同一番号只保留最新的一份，旧字幕删除。
@@ -144,9 +170,10 @@ export class SubtitleRepository {
             return {removed: 0, kept: all.length, groups: 0};
         }
 
-        const {tx, stores} = await database.transaction(["subtitles", "videoRecords"], "readwrite");
+        const {tx, stores} = await database.transaction(["subtitles", "subtitleMeta", "videoRecords"], "readwrite");
         for (const id of removedToKept.keys()) {
             stores.subtitles.delete(id);
+            stores.subtitleMeta.delete(id);
         }
 
         const videoReq = stores.videoRecords.getAll();
@@ -196,9 +223,10 @@ export class SubtitleRepository {
         if (removed.length === 0) return {removed: 0};
 
         const removedIds = new Set(removed.map((r) => r.id));
-        const {tx, stores} = await database.transaction(["subtitles", "videoRecords"], "readwrite");
+        const {tx, stores} = await database.transaction(["subtitles", "subtitleMeta", "videoRecords"], "readwrite");
         for (const id of removedIds) {
             stores.subtitles.delete(id);
+            stores.subtitleMeta.delete(id);
         }
 
         const videoReq = stores.videoRecords.getAll();
@@ -229,6 +257,33 @@ export class SubtitleRepository {
     if (!record?.selectedSubtitleId) return null;
     return this.getById(record.selectedSubtitleId);
   }
+
+    /** 保存用户手动修正的番号；后续打开该视频时优先使用。 */
+    async setManualCode(videoKey: string, code: string): Promise<void> {
+        const now = Date.now();
+        const {tx, stores} = await database.transaction("videoRecords", "readwrite");
+        const getReq = stores.videoRecords.get(videoKey);
+        await new Promise<void>((resolve) => {
+            getReq.onsuccess = () => {
+                const existing = getReq.result as VideoRecord | undefined;
+                const record: VideoRecord = existing
+                    ? {...existing, code, codeSource: "manual", updatedAt: now}
+                    : {
+                        videoKey,
+                        code,
+                        codeSource: "manual",
+                        subtitleEnabled: true,
+                        offsetMs: 0,
+                        lastPlayedAt: now,
+                        updatedAt: now,
+                    };
+                stores.videoRecords.put(record);
+                resolve();
+            };
+            getReq.onerror = () => resolve();
+        });
+        await this.waitForTransaction(tx);
+    }
 
   async setSelectedForVideo(videoKey: string, subtitleId: string): Promise<void> {
     const now = Date.now();
@@ -276,6 +331,76 @@ export class SubtitleRepository {
     await this.waitForTransaction(tx);
   }
 
+    /**
+     * 清理缓存：按时间和容量删除未受保护的记录。
+     *
+     * 保护规则：调用方传入的 protectIds（通常是当前播放字幕）。
+     * 删除后同步清除 `videoRecords.selectedSubtitleId` 中的引用。
+     */
+    async cleanup(options: CleanupOptions): Promise<CleanupResult> {
+        const all = await this.getAll();
+        const now = options.now ?? Date.now();
+        const protectIds = new Set(options.protectIds ?? []);
+        const sizes = new Map<string, number>();
+        for (const record of all) sizes.set(record.id, record.rawBlob?.size ?? 0);
+
+        const isProtected = (record: SubtitleRecord): boolean => protectIds.has(record.id);
+        const removedIds = new Set<string>();
+
+        if (options.olderThanDays > 0) {
+            const cutoff = now - options.olderThanDays * 24 * 60 * 60 * 1000;
+            for (const record of all) {
+                if (!isProtected(record) && (record.lastUsedAt ?? 0) < cutoff) {
+                    removedIds.add(record.id);
+                }
+            }
+        }
+
+        let totalBytes = all.reduce((sum, record) => sum + (sizes.get(record.id) ?? 0), 0);
+        for (const id of removedIds) totalBytes -= sizes.get(id) ?? 0;
+
+        if (options.maxBytes > 0 && totalBytes > options.maxBytes) {
+            const candidates = all
+                .filter((record) => !removedIds.has(record.id) && !isProtected(record))
+                .sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0));
+            for (const record of candidates) {
+                if (totalBytes <= options.maxBytes) break;
+                removedIds.add(record.id);
+                totalBytes -= sizes.get(record.id) ?? 0;
+            }
+        }
+
+        if (removedIds.size === 0) {
+            return {removed: 0, freedBytes: 0, totalBytes};
+        }
+
+        const freedBytes = [...removedIds].reduce((sum, id) => sum + (sizes.get(id) ?? 0), 0);
+        const {tx, stores} = await database.transaction(["subtitles", "subtitleMeta", "videoRecords"], "readwrite");
+        for (const id of removedIds) {
+            stores.subtitles.delete(id);
+            stores.subtitleMeta.delete(id);
+        }
+
+        const videoReq = stores.videoRecords.getAll();
+        await new Promise<void>((resolve, reject) => {
+            videoReq.onsuccess = () => {
+                const records = (videoReq.result as VideoRecord[]) ?? [];
+                const nowTs = Date.now();
+                for (const rec of records) {
+                    if (!rec.selectedSubtitleId || !removedIds.has(rec.selectedSubtitleId)) continue;
+                    rec.selectedSubtitleId = undefined;
+                    rec.updatedAt = nowTs;
+                    stores.videoRecords.put(rec);
+                }
+                resolve();
+            };
+            videoReq.onerror = () => reject(videoReq.error);
+        });
+
+        await this.waitForTransaction(tx);
+        return {removed: removedIds.size, freedBytes, totalBytes};
+    }
+
   async estimateSize(): Promise<{ count: number; bytes: number }> {
     const all = await this.getAll();
     let bytes = 0;
@@ -287,8 +412,9 @@ export class SubtitleRepository {
   }
 
   async clearAll(): Promise<void> {
-    const { tx, stores } = await database.transaction(["subtitles", "videoRecords"], "readwrite");
+      const {tx, stores} = await database.transaction(["subtitles", "subtitleMeta", "videoRecords"], "readwrite");
     stores.subtitles.clear();
+      stores.subtitleMeta.clear();
     stores.videoRecords.clear();
     await this.waitForTransaction(tx);
   }

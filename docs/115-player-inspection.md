@@ -63,12 +63,16 @@
   因此 `PlayerController` 必须在后续探测中补齐身份信息（见 `refreshIdentity`）。
 - 页面会删除 `Number.isFinite` 与 `Number.isInteger`（实测 `typeof Number.isFinite === "undefined"`）。
   开发模式下脚本运行在页面上下文，直接调用会抛 `TypeError`；统一改用 `src/utils/number.ts` 的 `isFiniteNumber`。
+- 手动修正的番号保存在 `videoRecords`（`codeSource: "manual"`），按 `videoKey` 绑定；切换视频不继承，
+  重新打开同一视频时优先于自动识别结果。
+- URL 没有 `pickcode` 时，只有播放列表仅有一个文件才回退；多个文件时只认 `li.hover`，避免猜错文件。
 
 ## 4. 页面变更频率与探测策略
 
 - 115 播放页会持续修改 DOM 属性（进度条、广告位、弹幕等）。
 - 对 `MutationObserver` 使用 `debounce` 会被无限重置，回调**永远不会执行**（实测身份信息一直无法刷新）。
-- 现改为 `throttle(400ms)`，保证持续变更时仍按间隔重新探测。
+- 现改为 `throttle(300ms)`，且 `MutationObserver` 只观察 `childList + subtree`；播放进度造成的
+  `class/style/src` 高频属性变化不再触发整页探测，视频切换依赖 `loadstart` / `loadedmetadata`。
 
 ## 5. 全屏
 
@@ -76,6 +80,7 @@
 
 - 尚未实测原生全屏进入的是 `video`、`#js-video_box` 还是页面根节点。
 - 若全屏元素是 `video` 本身，当前挂在 `#js-video_box` 下的 overlay 不会显示，需要回退方案。
+- 代码已增加 `fullscreenchange` 检测：全屏元素不包含 overlay 宿主时 toast 提示，不再静默无字幕；TextTrack 回退仍未实现。
 
 ## 6. 视频切换
 
@@ -109,6 +114,8 @@
 - 文件名来源：URL 的 `name` 参数（已 URL 解码）；文件 ID 使用路径中的 pickcode，`fid` 作为 fallback。
 - 播放列表切换时 path 里的 pickcode 会变化（示例 `e5exo0rcveo9ozlcb` → `akvrd2apyvdlmhfpm`）。
 - overlay 宿主使用 video 的直接父容器（`position: relative`），与 video 显示区域一致。
+- 字幕按钮定位：先按 `<button>字幕</button>` 文本匹配；文本变化时回退到 `aria-label` / `title`
+  包含「字幕」或 `subtitle` 的可见按钮。找不到时只记录一次控制栏按钮摘要，避免每秒刷日志。
 - CC 按钮插在原生「字幕」按钮的父容器之后，复用「倍速」按钮的样式：
   `p-1 text-sm whitespace-nowrap transition-colors text-white hover:text-blue-400`。
 - 播放列表切换会**替换 video 元素**（旧站是复用同一个元素），因此媒体事件监听挂在
@@ -125,7 +132,9 @@
 - 在 `115vod.com` 使用一条带 `sourceResult` 的在线字幕后，`115.com` 重新加载同一视频会先提示
   「正在从 115vod.com 恢复缓存字幕…」，约 1.8s 后恢复成功。
 - 恢复记录使用强 `videoKey`（`id:biym1swqjygpd8s12|dur:7216`），不会写成只有 fileId 的弱 key。
-- 只同步元数据和在线来源快照，不复制 Blob/Cues；两个页面之间没有实时推送，需要刷新或切换视频后重新读取。
+- 只同步元数据和在线来源快照，不复制 Blob/Cues。v0.3.0 起使用 `GM_addValueChangeListener` 做跨页面
+  事件推送；GM API 不可用时保留面板打开时的 15s 轮询。缓存页提供「刷新同步索引」按钮，可手动重新发布并读取。
+- 旧缓存可通过「补齐来源信息」按钮按 `providerId + sourceId` 精确回填下载信息；不会按标题猜测。
 
 ## 8. 已知限制
 
@@ -134,6 +143,7 @@
 - 开发模式运行在页面上下文，`GM_setValue` / `GM_xmlhttpRequest` 不可用：
   - 设置存储退回 `localStorage`（仅开发模式，生产仍走 GM 存储）；
   - 在线字幕搜索在开发模式下会失败，需要安装构建产物验证。
-- 「桌面全屏」仍未实测；「网页全屏」已在新旧播放页验证。见第 5 节。
+- 「桌面全屏」仍未实测；「网页全屏」已在新旧播放页验证。2026-11-03 尝试启动 Chrome 远程调试时
+  DevTools HTTP 端点不可用，未完成检查。见第 5 节。
 - ASS/SSA 当前只按扩展名识别，解析器尚未实现，会返回不支持错误。
 - 更多优化项与优先级见 `docs/optimization-backlog.md`。

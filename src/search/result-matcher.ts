@@ -5,7 +5,6 @@ const CODE_MATCH_WEIGHT = 40;
 const TITLE_SIMILARITY_WEIGHT = 15;
 const DURATION_WEIGHT = 20;
 const LANGUAGE_WEIGHT = 10;
-const RELEASE_WEIGHT = 10;
 const RELIABILITY_WEIGHT = 5;
 
 export function scoreResult(result: SubtitleSearchResult, query: SubtitleSearchQuery): { score: number; reasons: string[] } {

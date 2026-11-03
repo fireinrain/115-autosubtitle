@@ -6,6 +6,8 @@ export interface SubtitleSearchQuery {
   fileName?: string;
   duration?: number;
   languagePreferences: string[];
+    /** 手动搜索/用户重试时跳过 Provider 失败冷却。 */
+    force?: boolean;
   signal?: AbortSignal;
 }
 

@@ -10,21 +10,39 @@ export interface SearchCallbacks {
   onProgress?: (progress: SearchProgress) => void;
 }
 
+const PROVIDER_COOLDOWN_MS = 60_000;
+
 export class SubtitleSearchEngine {
+    /** 最近失败的网络来源，短时间内自动搜索不再重复打满请求。 */
+    private providerCooldownUntil = new Map<string, number>();
+
   async search(
     query: SubtitleSearchQuery,
     settings: GlobalSettings,
     callbacks?: SearchCallbacks,
   ): Promise<SubtitleSearchResult[]> {
-    const providers = providerManager.getEnabled(settings).filter((p) => p.id !== "local");
+      const allProviders = providerManager.getEnabled(settings).filter((p) => p.id !== "local");
+      const now = Date.now();
+      const providers = allProviders.filter(
+          (provider) => query.force || (this.providerCooldownUntil.get(provider.id) ?? 0) <= now,
+      );
 
-    if (providers.length === 0) {
+      if (allProviders.length === 0) {
       return [];
     }
 
     const providerStates: Record<string, ProviderState> = {};
-    for (const p of providers) {
-      providerStates[p.id] = { providerId: p.id, status: "pending", resultCount: 0 };
+      for (const provider of allProviders) {
+          const coolingDown = !providers.includes(provider);
+          providerStates[provider.id] = coolingDown
+              ? {
+                  providerId: provider.id,
+                  status: "error",
+                  errorMessage: "最近请求失败，自动搜索暂缓 60 秒；可手动搜索重试",
+                  errorCode: "PROVIDER_NETWORK_ERROR",
+                  resultCount: 0,
+              }
+              : {providerId: provider.id, status: "pending", resultCount: 0};
     }
 
     let allResults: SubtitleSearchResult[] = [];
@@ -45,6 +63,7 @@ export class SubtitleSearchEngine {
           this.timeout(12000, provider.id),
         ]);
 
+          this.providerCooldownUntil.delete(provider.id);
         providerStates[provider.id].status = result.length > 0 ? "success" : "no-results";
         providerStates[provider.id].resultCount = result.length;
 
@@ -65,7 +84,12 @@ export class SubtitleSearchEngine {
         } else {
           providerStates[provider.id].status = "error";
           providerStates[provider.id].errorMessage = e instanceof Error ? e.message : "未知错误";
-            if (isSubtitleError(e)) providerStates[provider.id].errorCode = e.code;
+            if (isSubtitleError(e)) {
+                providerStates[provider.id].errorCode = e.code;
+                if (e.code === "PROVIDER_NETWORK_ERROR" || e.code === "PROVIDER_TIMEOUT") {
+                    this.providerCooldownUntil.set(provider.id, Date.now() + PROVIDER_COOLDOWN_MS);
+                }
+            }
           logger.warn(`Provider ${provider.id} 搜索失败`, e);
         }
       }

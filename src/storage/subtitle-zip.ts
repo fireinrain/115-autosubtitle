@@ -1,11 +1,11 @@
 import type {SubtitleRecord} from "./database";
+import {isFiniteNumber} from "../utils/number";
 
 /**
- * 极简 ZIP 打包（仅 store，不压缩）。
+ * 极简 ZIP 打包（浏览器原生 deflate-raw，环境不支持时退回 store）。
  *
- * 字幕文件本身通常只有几十 KB，压缩收益不大；不引入 JSZip 之类依赖可以
- * 避免额外包体积和供应链风险。ZIP 结构参考 PKWARE APPNOTE：
- * 本地文件头 + 文件数据 + 中央目录 + EOCD。
+ * 不引入 JSZip 之类依赖可以避免额外包体积和供应链风险。
+ * ZIP 结构参考 PKWARE APPNOTE：本地文件头 + 文件数据 + 中央目录 + EOCD。
  */
 
 const CRC_TABLE = (() => {
@@ -88,6 +88,7 @@ function sanitizeFileName(name: string): string {
     // 只取文件名部分，避免 `../` 之类的路径穿越；再替换 Windows 不允许的字符。
     const base = name.split(/[\\/]/).pop() ?? name;
     const cleaned = base
+        // eslint-disable-next-line no-control-regex -- 文件名里的控制字符必须替换
         .replace(/[\u0000-\u001f<>:"|?*]/g, "_")
         .replace(/\s+/g, " ")
         .trim();
@@ -119,7 +120,7 @@ function makeUniqueName(base: string, used: Set<string>): string {
 }
 
 function dosDateTime(timestamp: number): { time: number; date: number } {
-    const date = new Date(Number.isFinite(timestamp) ? timestamp : Date.now());
+    const date = new Date(isFiniteNumber(timestamp) ? timestamp : Date.now());
     const year = Math.max(1980, date.getFullYear());
     return {
         time:

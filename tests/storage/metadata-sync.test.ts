@@ -41,7 +41,6 @@ function makeRecord(over: Partial<SubtitleRecord> = {}): SubtitleRecord {
         createdAt: 1000,
         lastUsedAt: 2000,
         parserVersion: 1,
-        isFavorite: false,
         sourceResult: makeResult(),
         ...over,
     };
@@ -171,6 +170,46 @@ describe("MetadataSyncService", () => {
         expect(bucket.subtitles.map((item) => item.id)).toEqual(["new", "old"]);
         expect(bucket.subtitles[0].size).toBe(5);
         expect(bucket.subtitles[1].size).toBe(2);
+    });
+
+
+    it("多个远程来源的选中项以视频记录 updatedAt 为准", async () => {
+        await subtitleRepository.save(makeRecord({id: "sub-old"}));
+        await subtitleRepository.saveVideoRecord(
+            makeVideo({selectedSubtitleId: "sub-old", updatedAt: 1000}),
+        );
+        await new MetadataSyncService(ORIGIN_OLD).publish();
+
+        await subtitleRepository.clearAll();
+        await subtitleRepository.save(
+            makeRecord({
+                id: "sub-new",
+                sourceId: "source-2",
+                title: "NEW.srt",
+                sourceResult: makeResult({sourceId: "source-2", title: "NEW.srt"}),
+            }),
+        );
+        await subtitleRepository.saveVideoRecord(
+            makeVideo({selectedSubtitleId: "sub-new", updatedAt: 5000}),
+        );
+        await new MetadataSyncService("115.com").publish();
+
+        const remote = new MetadataSyncService("115disk.com").getRemoteForVideo(VIDEO_KEY, "file-1");
+        expect(remote.selected?.id).toBe("sub-new");
+    });
+
+    it("清理远程索引只删除其他域名，不删除本地 bucket", async () => {
+        await subtitleRepository.save(makeRecord());
+        await new MetadataSyncService(ORIGIN_OLD).publish();
+        await new MetadataSyncService(ORIGIN_NEW).publish();
+
+        const service = new MetadataSyncService(ORIGIN_NEW);
+        expect(service.clearRemoteOrigins()).toEqual([ORIGIN_OLD]);
+        expect(service.getRemoteSummary()).toEqual({count: 0, bytes: 0, origins: []});
+
+        // 本域名刚发布的 bucket 仍然存在，后续 publish 可继续维护。
+        await service.publish();
+        expect(new MetadataSyncService(ORIGIN_OLD).getRemoteSummary().count).toBe(1);
     });
 
     it("GM 数据损坏时忽略坏数据并允许重新 publish", async () => {

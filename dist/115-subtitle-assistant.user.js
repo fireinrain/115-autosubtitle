@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115 Subtitle Assistant
 // @namespace    https://example.invalid/115-subtitle-assistant
-// @version      0.1.0
+// @version      0.3.0
 // @description  115 网页播放器字幕搜索、显示与本地缓存
 // @match        https://115vod.com/*
 // @match        https://115.com/players/*
@@ -9,8 +9,10 @@
 // @connect      subtitle.v.geilijiasu.com
 // @connect      www.subtitlecat.com
 // @grant        GM_addStyle
+// @grant        GM_addValueChangeListener
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_removeValueChangeListener
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
 // @run-at       document-idle
@@ -171,11 +173,13 @@
 				const pickcode = new URL(window.location.href).searchParams.get(PICKCODE_PARAM);
 				if (pickcode) return pickcode;
 			} catch {}
-			const activeItem = document.querySelector("#js-video_list li.hover[pickcode], #js-video_list li[pickcode]");
+            const activeItem = document.querySelector("#js-video_list li.hover[pickcode]");
 			if (activeItem) {
 				const pc = activeItem.getAttribute(PICKCODE_PARAM);
 				if (pc) return pc;
 			}
+            const items = document.querySelectorAll("#js-video_list li[pickcode]");
+            if (items.length === 1) return items[0].getAttribute(PICKCODE_PARAM) ?? void 0;
 		}
 		observe(onChange) {
 			const scheduleDetect = throttle(() => {
@@ -186,13 +190,7 @@
 			});
 			observer.observe(document.body, {
 				childList: true,
-				subtree: true,
-				attributes: true,
-				attributeFilter: [
-					"class",
-					"style",
-					"src"
-				]
+                subtree: true
 			});
 			const onFullscreenChange = () => scheduleDetect();
 			document.addEventListener("fullscreenchange", onFullscreenChange);
@@ -215,8 +213,9 @@
 		}
 	};
 	var m115VideoAdapter = new M115VideoAdapter();
-	function normalizeFileName(input) {
-		return input.normalize("NFKC").replace(/\.[a-z0-9]{2,5}$/i, "").replace(/[\s_.]+/g, " ").replace(/[\[\]【】（）()]/g, " ").replace(/\s+/g, " ").trim().toUpperCase();
+
+    function normalizeFileName$1(input) {
+        return input.normalize("NFKC").replace(/\.[a-z0-9]{2,5}$/i, "").replace(/[\s_.]+/g, " ").replace(/[\u005B\u005D【】（）()]/g, " ").replace(/\s+/g, " ").trim().toUpperCase();
 	}
 	var StandardCodeParser = class {
 		id = "standard-code";
@@ -282,7 +281,7 @@
 	var VideoIdentityService = class {
 		resolve(metadata) {
 			const originalFileName = metadata.fileName;
-			const normalizedFileName = originalFileName ? normalizeFileName(originalFileName) : void 0;
+            const normalizedFileName = originalFileName ? normalizeFileName$1(originalFileName) : void 0;
 			const parsedCode = normalizedFileName ? parseCode(normalizedFileName) : null;
 			const parts = [];
 			let confidence = "weak";
@@ -449,6 +448,9 @@
 		currentCues = [];
 		currentStyle = null;
 		visible = true;
+        positioning = false;
+        onPositionCommit = null;
+        pointerDrag = null;
 		mount(host) {
 			if (this.host === host && this.container?.isConnected) return;
 			this.unmount();
@@ -462,6 +464,10 @@
 			this.root.appendChild(this.styleEl);
 			this.stage = document.createElement("div");
 			this.stage.className = "subtitle-stage";
+            this.stage.addEventListener("pointerdown", this.handlePointerDown);
+            this.stage.addEventListener("pointermove", this.handlePointerMove);
+            this.stage.addEventListener("pointerup", this.handlePointerUp);
+            this.stage.addEventListener("pointercancel", this.handlePointerUp);
 			this.root.appendChild(this.stage);
 			host.appendChild(container);
 			this.container = container;
@@ -475,9 +481,12 @@
 			this.stage = null;
 			this.styleEl = null;
 			this.currentCues = [];
+            this.pointerDrag = null;
+            this.positioning = false;
+            this.onPositionCommit = null;
 		}
 		setCues(cues) {
-			if (cues.length === this.currentCues.length && cues.every((c, i) => c.id === this.currentCues[i]?.id)) return;
+            if (cues.length === this.currentCues.length && cues.every((cue, index) => cue === this.currentCues[index])) return;
 			this.currentCues = cues;
 			if (this.visible) this.render();
 		}
@@ -490,6 +499,22 @@
 		isVisible() {
 			return this.visible;
 		}
+
+        setPositioningMode(enabled, onCommit) {
+            this.positioning = enabled;
+            this.onPositionCommit = onCommit ?? null;
+            if (!enabled) this.pointerDrag = null;
+            if (this.stage) {
+                this.stage.style.cursor = enabled ? "move" : "";
+                this.stage.style.pointerEvents = enabled ? "auto" : "none";
+            }
+            this.applyStyle();
+            this.render();
+        }
+
+        isPositioningMode() {
+            return this.positioning;
+        }
 		setStyle(style) {
 			this.currentStyle = style;
 			this.applyStyle();
@@ -507,7 +532,11 @@
         max-width: ${s.maxWidthPercent}%;
         width: max-content;
         text-align: center;
-        pointer-events: none;
+        pointer-events: ${this.positioning ? "auto" : "none"};
+        cursor: ${this.positioning ? "move" : "default"};
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
       }
       .subtitle-line {
         /* 字幕用中文字幕字体栈，避免中文回退到西文字体后字形发虚、字重不统一。 */
@@ -533,6 +562,13 @@
 		render() {
 			if (!this.stage || !this.visible) return;
 			this.stage.replaceChildren();
+            if (this.positioning && this.currentCues.length === 0) {
+                const placeholder = document.createElement("div");
+                placeholder.className = "subtitle-line";
+                placeholder.textContent = "拖动字幕调整位置";
+                this.stage.appendChild(placeholder);
+                return;
+            }
 			for (const cue of this.currentCues) {
 				const line = document.createElement("div");
 				line.className = "subtitle-line";
@@ -551,29 +587,95 @@
 				this.stage.appendChild(line);
 			}
 		}
+
+        handlePointerDown = (event) => {
+            if (!this.positioning || !this.stage || !this.host) return;
+            if (event.button !== 0) return;
+            const hostRect = this.host.getBoundingClientRect();
+            const stageRect = this.stage.getBoundingClientRect();
+            if (hostRect.width <= 0 || hostRect.height <= 0) return;
+            event.preventDefault();
+            event.stopPropagation();
+            this.stage.setPointerCapture(event.pointerId);
+            this.pointerDrag = {
+                pointerId: event.pointerId,
+                offsetX: event.clientX - (stageRect.left + stageRect.width / 2),
+                offsetY: event.clientY - (stageRect.top + stageRect.height / 2),
+                xPercent: this.currentStyle?.xPercent ?? 50,
+                yPercent: this.currentStyle?.yPercent ?? 88
+            };
+        };
+        handlePointerMove = (event) => {
+            const drag = this.pointerDrag;
+            if (!drag || drag.pointerId !== event.pointerId || !this.stage || !this.host) return;
+            const hostRect = this.host.getBoundingClientRect();
+            if (hostRect.width <= 0 || hostRect.height <= 0) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const xPercent = clampPercent((event.clientX - drag.offsetX - hostRect.left) / hostRect.width * 100, 5, 95);
+            const yPercent = clampPercent((event.clientY - drag.offsetY - hostRect.top) / hostRect.height * 100, 20, 98);
+            drag.xPercent = xPercent;
+            drag.yPercent = yPercent;
+            this.stage.style.left = `${xPercent}%`;
+            this.stage.style.top = `${yPercent}%`;
+        };
+        handlePointerUp = (event) => {
+            const drag = this.pointerDrag;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            this.pointerDrag = null;
+            if (this.stage?.hasPointerCapture(event.pointerId)) this.stage.releasePointerCapture(event.pointerId);
+            event.preventDefault();
+            event.stopPropagation();
+            this.onPositionCommit?.(drag.xPercent, drag.yPercent);
+        };
 		dispose() {
 			this.unmount();
 		}
 	};
+
+    function clampPercent(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+    }
 	function hexToRgba(hex, alpha) {
 		const h = hex.replace("#", "");
 		return `rgba(${parseInt(h.substring(0, 2), 16)}, ${parseInt(h.substring(2, 4), 16)}, ${parseInt(h.substring(4, 6), 16)}, ${alpha})`;
 	}
+
+    function toSubtitleMeta(record) {
+        return {
+            id: record.id,
+            videoKey: record.videoKey,
+            code: record.code,
+            providerId: record.providerId,
+            sourceId: record.sourceId,
+            title: record.title,
+            language: record.language,
+            format: record.format,
+            cueCount: record.cueCount,
+            checksum: record.checksum,
+            size: record.rawBlob?.size ?? 0,
+            createdAt: record.createdAt,
+            lastUsedAt: record.lastUsedAt,
+            parserVersion: record.parserVersion,
+            sourceResult: record.sourceResult
+        };
+    }
 	var DB_NAME = "115SubtitleAssistantDB";
 	var Database = class {
 		dbPromise = null;
 		open() {
 			if (this.dbPromise) return this.dbPromise;
 			this.dbPromise = new Promise((resolve, reject) => {
-				const request = indexedDB.open(DB_NAME, 1);
+                const request = indexedDB.open(DB_NAME, 2);
 				request.onerror = () => reject(request.error);
 				request.onblocked = () => reject(new Error("数据库被阻塞"));
 				request.onsuccess = () => resolve(request.result);
-				request.onupgradeneeded = () => this.upgrade(request.result);
+                request.onupgradeneeded = (event) => this.upgrade(request.result, event.oldVersion);
 			});
 			return this.dbPromise;
 		}
-		upgrade(db) {
+
+        upgrade(db, oldVersion) {
 			if (!db.objectStoreNames.contains("subtitles")) {
 				const store = db.createObjectStore("subtitles", { keyPath: "id" });
 				store.createIndex("videoKey", "videoKey", { unique: false });
@@ -584,6 +686,24 @@
 			}
 			if (!db.objectStoreNames.contains("videoRecords")) db.createObjectStore("videoRecords", { keyPath: "videoKey" }).createIndex("lastPlayedAt", "lastPlayedAt", { unique: false });
 			if (!db.objectStoreNames.contains("settings")) db.createObjectStore("settings", { keyPath: "key" });
+            if (!db.objectStoreNames.contains("subtitleMeta")) {
+                const metaStore = db.createObjectStore("subtitleMeta", {keyPath: "id"});
+                metaStore.createIndex("videoKey", "videoKey", {unique: false});
+                metaStore.createIndex("code", "code", {unique: false});
+                metaStore.createIndex("providerId", "providerId", {unique: false});
+                metaStore.createIndex("lastUsedAt", "lastUsedAt", {unique: false});
+                metaStore.createIndex("checksum", "checksum", {unique: false});
+                if (oldVersion < 2 && db.objectStoreNames.contains("subtitles")) {
+                    const cursorReq = metaStore.transaction.objectStore("subtitles").openCursor();
+                    cursorReq.onsuccess = () => {
+                        const cursor = cursorReq.result;
+                        if (!cursor) return;
+                        const record = cursor.value;
+                        if (record && typeof record.id === "string") metaStore.put(toSubtitleMeta(record));
+                        cursor.continue();
+                    };
+                }
+            }
 		}
 		async transaction(storeNames, mode) {
 			const db = await this.open();
@@ -618,14 +738,15 @@
 		return error instanceof SubtitleError;
 	}
 
-    function normalizeCode(code) {
+    function normalizeCode$1(code) {
         return code.trim().toUpperCase().replace(/\s+/g, "");
     }
 	var SubtitleRepository = class {
 		async save(record) {
 			try {
-				const { tx, stores } = await database.transaction("subtitles", "readwrite");
+                const {tx, stores} = await database.transaction(["subtitles", "subtitleMeta"], "readwrite");
 				stores.subtitles.put(record);
+                stores.subtitleMeta.put(toSubtitleMeta(record));
 				await this.waitForTransaction(tx);
 			} catch (e) {
 				if (e instanceof DOMException && e.name === "QuotaExceededError") throw new SubtitleError("CACHE_QUOTA_EXCEEDED", "缓存空间不足", e);
@@ -659,8 +780,13 @@
             return (await this.getByVideoKey(videoKey)).find((r) => r.checksum === checksum) ?? null;
         }
 		async delete(id) {
-			const { tx, stores } = await database.transaction(["subtitles", "videoRecords"], "readwrite");
+            const {tx, stores} = await database.transaction([
+                "subtitles",
+                "subtitleMeta",
+                "videoRecords"
+            ], "readwrite");
 			stores.subtitles.delete(id);
+            stores.subtitleMeta.delete(id);
 			const allReq = stores.videoRecords.index("lastPlayedAt").getAll();
 			await new Promise((resolve) => {
 				allReq.onsuccess = () => {
@@ -682,11 +808,18 @@
 			return req.result ?? [];
 		}
 
+        async getAllMetadata() {
+            const {tx, stores} = await database.transaction("subtitleMeta", "readonly");
+            const req = stores.subtitleMeta.getAll();
+            await this.waitForTransaction(tx);
+            return req.result ?? [];
+        }
+
         async deduplicateByCode() {
             const all = await this.getAll();
             const groups = new Map();
             for (const record of all) {
-                const key = normalizeCode(record.code ?? "");
+                const key = normalizeCode$1(record.code ?? "");
                 if (!key) continue;
                 const list = groups.get(key);
                 if (list) list.push(record);
@@ -706,8 +839,15 @@
                 kept: all.length,
                 groups: 0
             };
-            const {tx, stores} = await database.transaction(["subtitles", "videoRecords"], "readwrite");
-            for (const id of removedToKept.keys()) stores.subtitles.delete(id);
+            const {tx, stores} = await database.transaction([
+                "subtitles",
+                "subtitleMeta",
+                "videoRecords"
+            ], "readwrite");
+            for (const id of removedToKept.keys()) {
+                stores.subtitles.delete(id);
+                stores.subtitleMeta.delete(id);
+            }
             const videoReq = stores.videoRecords.getAll();
             await new Promise((resolve, reject) => {
                 videoReq.onsuccess = () => {
@@ -734,16 +874,23 @@
         }
 
         async replaceByCode(code, keepId) {
-            const key = normalizeCode(code);
+            const key = normalizeCode$1(code);
             if (!key) return {removed: 0};
             const all = await this.getAll();
             const keep = all.find((r) => r.id === keepId);
             if (!keep) return {removed: 0};
-            const removed = all.filter((r) => r.id !== keepId && normalizeCode(r.code ?? "") === key);
+            const removed = all.filter((r) => r.id !== keepId && normalizeCode$1(r.code ?? "") === key);
             if (removed.length === 0) return {removed: 0};
             const removedIds = new Set(removed.map((r) => r.id));
-            const {tx, stores} = await database.transaction(["subtitles", "videoRecords"], "readwrite");
-            for (const id of removedIds) stores.subtitles.delete(id);
+            const {tx, stores} = await database.transaction([
+                "subtitles",
+                "subtitleMeta",
+                "videoRecords"
+            ], "readwrite");
+            for (const id of removedIds) {
+                stores.subtitles.delete(id);
+                stores.subtitleMeta.delete(id);
+            }
             const videoReq = stores.videoRecords.getAll();
             await new Promise((resolve, reject) => {
                 videoReq.onsuccess = () => {
@@ -770,6 +917,35 @@
 			if (!record?.selectedSubtitleId) return null;
 			return this.getById(record.selectedSubtitleId);
 		}
+
+        async setManualCode(videoKey, code) {
+            const now = Date.now();
+            const {tx, stores} = await database.transaction("videoRecords", "readwrite");
+            const getReq = stores.videoRecords.get(videoKey);
+            await new Promise((resolve) => {
+                getReq.onsuccess = () => {
+                    const existing = getReq.result;
+                    const record = existing ? {
+                        ...existing,
+                        code,
+                        codeSource: "manual",
+                        updatedAt: now
+                    } : {
+                        videoKey,
+                        code,
+                        codeSource: "manual",
+                        subtitleEnabled: true,
+                        offsetMs: 0,
+                        lastPlayedAt: now,
+                        updatedAt: now
+                    };
+                    stores.videoRecords.put(record);
+                    resolve();
+                };
+                getReq.onerror = () => resolve();
+            });
+            await this.waitForTransaction(tx);
+        }
 		async setSelectedForVideo(videoKey, subtitleId) {
 			const now = Date.now();
 			const { tx, stores } = await database.transaction("videoRecords", "readwrite");
@@ -814,6 +990,66 @@
 			const { tx, stores } = await database.transaction("videoRecords", "readwrite");
 			stores.videoRecords.put(record);
 			await this.waitForTransaction(tx);
+        }
+
+        async cleanup(options) {
+            const all = await this.getAll();
+            const now = options.now ?? Date.now();
+            const protectIds = new Set(options.protectIds ?? []);
+            const sizes = new Map();
+            for (const record of all) sizes.set(record.id, record.rawBlob?.size ?? 0);
+            const isProtected = (record) => protectIds.has(record.id);
+            const removedIds = new Set();
+            if (options.olderThanDays > 0) {
+                const cutoff = now - options.olderThanDays * 24 * 60 * 60 * 1e3;
+                for (const record of all) if (!isProtected(record) && (record.lastUsedAt ?? 0) < cutoff) removedIds.add(record.id);
+            }
+            let totalBytes = all.reduce((sum, record) => sum + (sizes.get(record.id) ?? 0), 0);
+            for (const id of removedIds) totalBytes -= sizes.get(id) ?? 0;
+            if (options.maxBytes > 0 && totalBytes > options.maxBytes) {
+                const candidates = all.filter((record) => !removedIds.has(record.id) && !isProtected(record)).sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0));
+                for (const record of candidates) {
+                    if (totalBytes <= options.maxBytes) break;
+                    removedIds.add(record.id);
+                    totalBytes -= sizes.get(record.id) ?? 0;
+                }
+            }
+            if (removedIds.size === 0) return {
+                removed: 0,
+                freedBytes: 0,
+                totalBytes
+            };
+            const freedBytes = [...removedIds].reduce((sum, id) => sum + (sizes.get(id) ?? 0), 0);
+            const {tx, stores} = await database.transaction([
+                "subtitles",
+                "subtitleMeta",
+                "videoRecords"
+            ], "readwrite");
+            for (const id of removedIds) {
+                stores.subtitles.delete(id);
+                stores.subtitleMeta.delete(id);
+            }
+            const videoReq = stores.videoRecords.getAll();
+            await new Promise((resolve, reject) => {
+                videoReq.onsuccess = () => {
+                    const records = videoReq.result ?? [];
+                    const nowTs = Date.now();
+                    for (const rec of records) {
+                        if (!rec.selectedSubtitleId || !removedIds.has(rec.selectedSubtitleId)) continue;
+                        rec.selectedSubtitleId = void 0;
+                        rec.updatedAt = nowTs;
+                        stores.videoRecords.put(rec);
+                    }
+                    resolve();
+                };
+                videoReq.onerror = () => reject(videoReq.error);
+            });
+            await this.waitForTransaction(tx);
+            return {
+                removed: removedIds.size,
+                freedBytes,
+                totalBytes
+            };
 		}
 		async estimateSize() {
 			const all = await this.getAll();
@@ -828,8 +1064,13 @@
 			};
 		}
 		async clearAll() {
-			const { tx, stores } = await database.transaction(["subtitles", "videoRecords"], "readwrite");
+            const {tx, stores} = await database.transaction([
+                "subtitles",
+                "subtitleMeta",
+                "videoRecords"
+            ], "readwrite");
 			stores.subtitles.clear();
+            stores.subtitleMeta.clear();
 			stores.videoRecords.clear();
 			await this.waitForTransaction(tx);
 		}
@@ -868,9 +1109,18 @@
 		}
 		start() {
 			this.stopObserving = this.adapter.observe((ctx) => this.handleContext(ctx));
+            document.addEventListener("fullscreenchange", this.handleFullscreenChange);
 			const initial = this.adapter.detect();
 			if (initial) this.handleContext(initial);
 		}
+
+        handleFullscreenChange = () => {
+            const fullscreen = document.fullscreenElement;
+            const context = this.currentContext;
+            if (!fullscreen || !context) return;
+            if (fullscreen === context.overlayHost || fullscreen.contains(context.overlayHost)) return;
+            this.events.onOverlayUnsupported?.(fullscreen === context.video ? "当前为 video 原生全屏，自定义字幕层不会显示" : "当前全屏元素不包含字幕层");
+        };
 		handleContext(ctx) {
 			if (!ctx) {
 				this.detach();
@@ -900,9 +1150,12 @@
                 this.events.onCacheRestoreSettled?.(identity, Boolean(cached));
                 return;
             }
-			this.currentSubtitleId = cached.id;
-			this.loadCues(cached.cues);
-			this.events.onSubtitleLoaded?.(cached.title, cached.id);
+            const resolved = await this.events.resolveCachedSubtitle?.(cached);
+            if (gen !== this.generation || this.currentSubtitleId) return;
+            const loaded = resolved ?? cached;
+            this.currentSubtitleId = loaded.id;
+            this.loadCues(loaded.cues);
+            this.events.onSubtitleLoaded?.(loaded.title, loaded.id);
             this.events.onCacheRestoreSettled?.(identity, true);
 		}
 		isSameVideo(a, b) {
@@ -934,6 +1187,7 @@
 			this.unbindVideoEvents();
 			this.timeline.clear();
 			this.renderer.setCues([]);
+            this.renderer.setPositioningMode(false);
 			this.renderer.unmount();
 			this.currentSubtitleId = null;
 			this.currentContext = null;
@@ -1011,6 +1265,16 @@
 			this.subtitleVisible = visible;
 			this.renderer.setVisible(visible);
 		}
+
+        setPositioningMode(enabled) {
+            this.renderer.setPositioningMode(enabled, (xPercent, yPercent) => {
+                this.events.onPositionChange?.(xPercent, yPercent);
+            });
+        }
+
+        isPositioningMode() {
+            return this.renderer.isPositioningMode();
+        }
 		getSubtitleVisible() {
 			return this.subtitleVisible;
 		}
@@ -1049,6 +1313,7 @@
 			this.renderer.setCues(cues);
 		}
 		dispose() {
+            document.removeEventListener("fullscreenchange", this.handleFullscreenChange);
 			this.stopObserving?.();
 			this.detach();
 		}
@@ -1071,9 +1336,42 @@
 		}
 	};
 	var localFileProvider = new LocalFileProvider();
+    var MAX_CONCURRENT_REQUESTS = 3;
+    var MIN_HOST_INTERVAL_MS = 250;
 	var GmRequestClient = class {
+        activeRequests = 0;
+        hostNextAllowedAt = new Map();
+        waiters = [];
 		async request(options) {
-			const { url, method = "GET", headers, data, responseType = "text", timeoutMs = 15e3, signal, maxBytes } = options;
+            const host = this.hostOf(options.url);
+            await this.acquire(host, options.signal);
+            try {
+                let attempt = 0;
+                const retries = Math.max(0, options.retry ?? 0);
+                for (; ;) try {
+                    return await this.requestOnce(options);
+                } catch (error) {
+                    if (attempt >= retries || !this.shouldRetry(error) || options.signal?.aborted) throw error;
+                    attempt++;
+                    await this.sleep(400 * 2 ** (attempt - 1), options.signal);
+                }
+            } finally {
+                this.release();
+            }
+        }
+
+        async requestOnce(options) {
+            const {
+                url,
+                method = "GET",
+                headers,
+                data,
+                responseType = "text",
+                timeoutMs = 15e3,
+                signal,
+                maxBytes,
+                allowedHosts
+            } = options;
             if (typeof GM_xmlhttpRequest !== "function") return Promise.reject(new SubtitleError("NETWORK_UNAVAILABLE", "当前环境没有 GM_xmlhttpRequest，无法跨域请求字幕来源"));
 			return new Promise((resolve, reject) => {
 				const handle = GM_xmlhttpRequest({
@@ -1088,6 +1386,20 @@
 							reject(new SubtitleError("PROVIDER_BAD_RESPONSE", `HTTP ${resp.status} ${resp.statusText}`));
 							return;
 						}
+                        const finalUrl = resp.finalUrl ?? url;
+                        if (allowedHosts && allowedHosts.length > 0) {
+                            let finalHost;
+                            try {
+                                finalHost = new URL(finalUrl).hostname;
+                            } catch {
+                                reject(new SubtitleError("PROVIDER_BAD_RESPONSE", "响应地址不合法"));
+                                return;
+                            }
+                            if (!allowedHosts.includes(finalHost)) {
+                                reject(new SubtitleError("PROVIDER_BAD_RESPONSE", `响应重定向到未授权域名：${finalHost}`));
+                                return;
+                            }
+                        }
 						const body = resp.response;
 						if (maxBytes && typeof body === "string" && body.length > maxBytes) {
 							reject(new SubtitleError("FILE_TOO_LARGE", "响应体超过最大限制"));
@@ -1102,7 +1414,7 @@
 							statusText: resp.statusText,
 							headers: resp.responseHeaders ? this.parseHeaders(resp.responseHeaders) : {},
 							body,
-							finalUrl: resp.finalUrl ?? url
+                            finalUrl
 						});
 					},
 					onerror: () => {
@@ -1127,6 +1439,53 @@
 						reject(new SubtitleError("PROVIDER_TIMEOUT", "请求已取消"));
 					});
 				}
+            });
+        }
+
+        hostOf(url) {
+            try {
+                return new URL(url).hostname;
+            } catch {
+                return "unknown-host";
+            }
+        }
+
+        async acquire(host, signal) {
+            if (signal?.aborted) throw new SubtitleError("PROVIDER_TIMEOUT", "请求已取消");
+            while (this.activeRequests >= MAX_CONCURRENT_REQUESTS) {
+                await new Promise((resolve) => this.waiters.push(resolve));
+                if (signal?.aborted) throw new SubtitleError("PROVIDER_TIMEOUT", "请求已取消");
+            }
+            const waitMs = (this.hostNextAllowedAt.get(host) ?? 0) + MIN_HOST_INTERVAL_MS - Date.now();
+            if (waitMs > 0) await this.sleep(waitMs, signal);
+            if (signal?.aborted) throw new SubtitleError("PROVIDER_TIMEOUT", "请求已取消");
+            this.activeRequests++;
+            this.hostNextAllowedAt.set(host, Date.now());
+        }
+
+        release() {
+            this.activeRequests = Math.max(0, this.activeRequests - 1);
+            this.waiters.shift()?.();
+        }
+
+        shouldRetry(error) {
+            if (!(error instanceof SubtitleError)) return false;
+            if (error.code === "PROVIDER_NETWORK_ERROR") return true;
+            return error.code === "PROVIDER_BAD_RESPONSE" && /^HTTP 5\d\d\b/.test(error.message);
+        }
+
+        sleep(ms, signal) {
+            if (signal?.aborted) return Promise.reject(new SubtitleError("PROVIDER_TIMEOUT", "请求已取消"));
+            return new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                    signal?.removeEventListener("abort", onAbort);
+                    resolve();
+                }, ms);
+                const onAbort = () => {
+                    clearTimeout(timer);
+                    reject(new SubtitleError("PROVIDER_TIMEOUT", "请求已取消"));
+                };
+                signal?.addEventListener("abort", onAbort, {once: true});
 			});
 		}
 		parseHeaders(raw) {
@@ -1153,6 +1512,7 @@
 		});
 	}
 	var SEARCH_ENDPOINT = "https://api-shoulei-ssl.xunlei.com/oracle/subtitle";
+    var SEARCH_HOST = "api-shoulei-ssl.xunlei.com";
 	var DOWNLOAD_HOST = "subtitle.v.geilijiasu.com";
 	var SUPPORTED_FORMATS = [
 		"srt",
@@ -1177,7 +1537,9 @@
 					method: "GET",
 					responseType: "text",
 					timeoutMs: 15e3,
-					signal: query.signal
+                    signal: query.signal,
+                    allowedHosts: [SEARCH_HOST],
+                    retry: 1
 				});
 				const data = JSON.parse(resp.body);
 				if (data.code !== 0 || !Array.isArray(data.data)) {
@@ -1220,6 +1582,27 @@
 				throw new SubtitleError("PROVIDER_NETWORK_ERROR", "迅雷字幕搜索失败", e);
 			}
 		}
+
+        async healthCheck() {
+            try {
+                const url = new URL(SEARCH_ENDPOINT);
+                url.searchParams.set("name", "test");
+                await gmRequestClient.request({
+                    url: url.toString(),
+                    method: "GET",
+                    responseType: "text",
+                    timeoutMs: 1e4,
+                    allowedHosts: [SEARCH_HOST],
+                    retry: 1
+                });
+                return {ok: true};
+            } catch (e) {
+                return {
+                    ok: false,
+                    message: e instanceof Error ? e.message : "迅雷字幕不可用"
+                };
+            }
+        }
 		async download(result, signal) {
 			if (!result.downloadUrl) throw new SubtitleError("DOWNLOAD_FAILED", "缺少下载地址");
 			if (new URL(result.downloadUrl).hostname !== DOWNLOAD_HOST) throw new SubtitleError("DOWNLOAD_FAILED", "下载地址域名不合法");
@@ -1231,7 +1614,9 @@
 					responseType: "arraybuffer",
 					timeoutMs: 3e4,
 					signal,
-					maxBytes: 5242880
+                    maxBytes: 5242880,
+                    allowedHosts: [DOWNLOAD_HOST],
+                    retry: 1
 				});
 				const fileName = result.title || `subtitle.${result.format}`;
 				const checksum = await computeChecksum(resp.body);
@@ -1259,6 +1644,7 @@
 	};
 	var xunleiProvider = new XunleiProvider();
 	var BASE_URL = "https://www.subtitlecat.com";
+    var ALLOWED_HOSTS = ["www.subtitlecat.com"];
 	var MAX_CANDIDATES = 20;
 	var MAX_CONCURRENT_DETAIL = 5;
 	var SubtitleCatProvider = class {
@@ -1277,7 +1663,9 @@
 					method: "GET",
 					responseType: "text",
 					timeoutMs: 15e3,
-					signal: query.signal
+                    signal: query.signal,
+                    allowedHosts: ALLOWED_HOSTS,
+                    retry: 1
 				});
 				const candidates = this.parseSearchHtml(resp.body, keyword);
 				if (candidates.length === 0) {
@@ -1293,6 +1681,25 @@
 				throw new SubtitleError("PROVIDER_NETWORK_ERROR", "SubtitleCat 搜索失败", e);
 			}
 		}
+
+        async healthCheck() {
+            try {
+                await gmRequestClient.request({
+                    url: `${BASE_URL}/`,
+                    method: "GET",
+                    responseType: "text",
+                    timeoutMs: 1e4,
+                    allowedHosts: ALLOWED_HOSTS,
+                    retry: 1
+                });
+                return {ok: true};
+            } catch (e) {
+                return {
+                    ok: false,
+                    message: e instanceof Error ? e.message : "SubtitleCat 不可用"
+                };
+            }
+        }
 		async download(result, signal) {
 			if (!result.downloadUrl) throw new SubtitleError("DOWNLOAD_FAILED", "缺少下载地址");
             const url = new URL(result.downloadUrl);
@@ -1305,7 +1712,9 @@
 					responseType: "arraybuffer",
 					timeoutMs: 3e4,
 					signal,
-					maxBytes: 5242880
+                    maxBytes: 5242880,
+                    allowedHosts: ALLOWED_HOSTS,
+                    retry: 1
 				});
                 const titleHasExtension = /\.(srt|vtt|ass|ssa)$/i.test(result.title ?? "");
                 const urlFileName = decodeURIComponent(url.pathname.split("/").pop() || "");
@@ -1368,7 +1777,8 @@
 				method: "GET",
 				responseType: "text",
 				timeoutMs: 15e3,
-				signal
+                signal,
+                allowedHosts: ALLOWED_HOSTS
 			});
 			const doc = new DOMParser().parseFromString(resp.body, "text/html");
 			const srtLinks = Array.from(doc.querySelectorAll("a[href*=\".srt\"]"));
@@ -1555,7 +1965,7 @@
   * { box-sizing: border-box; }
   .panel {
     position: fixed; display: none; flex-direction: column;
-    width: 400px; max-height: min(62vh, 620px);
+    width: min(400px, calc(100vw - 16px)); max-height: min(62vh, 620px);
     background: #1e1e2e; color: #cdd6f4;
     border: 1px solid #45475a; border-radius: 10px;
     box-shadow: 0 12px 40px rgba(0,0,0,.55);
@@ -1587,6 +1997,9 @@
   .field-label { min-width: 62px; font-size: 12px; color: #a6adc8; }
   .input { flex: 1; min-width: 0; padding: 6px 10px; background: #313244; border: 1px solid #45475a; border-radius: 6px; color: #cdd6f4; font-size: 13px; }
   .input:focus { outline: none; border-color: #89b4fa; }
+  .input:focus-visible, .btn:focus-visible, .tab:focus-visible, .pill:focus-visible, .close:focus-visible {
+    outline: 2px solid #89b4fa; outline-offset: 2px;
+  }
   select.input { cursor: pointer; }
   .btn { padding: 6px 12px; background: #89b4fa; color: #1e1e2e; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; white-space: nowrap; }
   .btn:hover { background: #74c7ec; }
@@ -1619,11 +2032,21 @@
   .modal-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #181825; border-bottom: 1px solid #313244; }
   .modal-title { flex: 1; font-size: 13px; font-weight: 600; word-break: break-all; }
   .modal-body { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  .confirm-modal { width: 420px; }
+  .confirm-text { padding: 18px 16px 8px; color: #cdd6f4; font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px 16px; }
   .preview-line { padding: 3px 0; border-bottom: 1px solid #313244; font-size: 12px; line-height: 1.6; color: #cdd6f4; }
   .preview-line:last-child { border-bottom: none; }
   .preview-line:empty { border-bottom: none; padding: 0; height: 8px; }
   .preview-time { color: #89b4fa; font-variant-numeric: tabular-nums; }
   .preview-text { color: #cdd6f4; }
+  @media (max-width: 520px) {
+    .result-head { flex-wrap: wrap; }
+    .result-title-wrap { max-width: 100%; flex: 1 1 100%; }
+    .result-actions { margin-left: 0; flex-wrap: wrap; }
+    .modal { width: 96vw; max-width: 96vw; max-height: 86vh; }
+    .modal-overlay { padding: 8px; }
+  }
 `;
 	function div(className, text) {
 		const el = document.createElement("div");
@@ -1670,8 +2093,15 @@
 		codeDraft = null;
 		toastEl = null;
 		toastTimer = null;
+        confirmEl = null;
+        confirmResolve = null;
+        lastFocusedElement = null;
+        renderScheduled = false;
+        positioning = false;
 		playerRoot = null;
 		playerBarObserver = null;
+        scheduleNativeToggle = throttle(() => this.ensureNativeToggle(), 100);
+        nativeToggleWarned = false;
 		nativeToggle = null;
 		subtitleVisible = true;
         lastAnchorRect = null;
@@ -1696,40 +2126,44 @@
 		setIdentity(identity) {
 			if (this.identity?.videoKey !== identity?.videoKey) this.codeDraft = null;
 			this.identity = identity;
-			this.renderBody();
+            this.requestRender(["subs"]);
 		}
 		setProgress(progress) {
 			this.progress = progress;
-			this.renderBody();
+            this.requestRender(["subs"]);
 		}
 		setCurrentSubtitle(title, subtitleId = null) {
 			this.currentSubtitle = title;
 			this.currentSubtitleId = subtitleId;
-			this.renderBody();
+            this.requestRender(["subs"]);
 		}
 		setCachedSubtitles(subtitles) {
 			this.cachedSubtitles = subtitles;
-			this.renderBody();
+            this.requestRender(["subs", "cache"]);
 		}
 
         setRemoteSubtitles(subtitles) {
             this.remoteSubtitles = subtitles;
-            this.renderBody();
+            this.requestRender(["subs", "cache"]);
         }
 
         setRemoteSummary(summary) {
             this.remoteSummary = summary;
-            if (this.visible && this.activeTab === "cache") this.renderBody();
+            this.requestRender(["cache"]);
         }
 
         setCacheSummary(summary) {
             const changed = this.cacheSummary.count !== summary.count || this.cacheSummary.bytes !== summary.bytes;
             this.cacheSummary = summary;
-            if (changed && this.visible && this.activeTab === "cache") this.renderBody();
+            if (changed) this.requestRender(["cache"]);
         }
 		setSettings(settings, updateView = true) {
 			this.settings = settings;
-			if (updateView) this.renderBody();
+            if (updateView) this.requestRender([
+                "subs",
+                "style",
+                "sync"
+            ]);
 		}
 		show(tab = this.activeTab) {
 			this.visible = true;
@@ -1738,6 +2172,10 @@
 			this.positionPanel();
 		}
 		hide() {
+            if (this.positioning) {
+                this.positioning = false;
+                this.callbacks.onPositioningChange(false);
+            }
 			this.visible = false;
 			this.panelEl?.classList.remove("open");
 		}
@@ -1748,14 +2186,20 @@
 			this.modalEl?.remove();
 			this.modalEl = null;
 			if (!this.root) return;
+            this.lastFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 			const overlay = div("modal-overlay");
 			overlay.addEventListener("click", (e) => {
 				if (e.target === overlay) this.closePreview();
 			});
 			const modal = div("modal");
+            modal.setAttribute("role", "dialog");
+            modal.setAttribute("aria-modal", "true");
+            modal.setAttribute("aria-label", `字幕预览：${title}`);
 			const header = div("modal-header");
 			header.appendChild(div("modal-title", title));
-			header.appendChild(btn("close", "×", () => this.closePreview()));
+            const closeButton = btn("close", "×", () => this.closePreview());
+            closeButton.setAttribute("aria-label", "关闭字幕预览");
+            header.appendChild(closeButton);
 			const body = div("modal-body");
 			const lines = content.split("\n");
 			for (const line of lines) {
@@ -1767,20 +2211,65 @@
 			overlay.appendChild(modal);
 			this.root.appendChild(overlay);
 			this.modalEl = overlay;
+            closeButton.focus();
+        }
+
+        showConfirm(message) {
+            if (!this.root) return Promise.resolve(false);
+            if (this.confirmEl) this.closeConfirm(false);
+            this.lastFocusedElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            const overlay = div("modal-overlay");
+            const modal = div("modal confirm-modal");
+            modal.setAttribute("role", "dialog");
+            modal.setAttribute("aria-modal", "true");
+            modal.setAttribute("aria-label", "确认操作");
+            const text = div("confirm-text", message);
+            const actions = div("modal-actions");
+            const cancel = btn("btn btn-ghost", "取消", () => this.closeConfirm(false));
+            const confirm = btn("btn btn-danger", "确定", () => this.closeConfirm(true));
+            cancel.type = "button";
+            confirm.type = "button";
+            actions.append(cancel, confirm);
+            modal.append(text, actions);
+            overlay.appendChild(modal);
+            overlay.addEventListener("click", (event) => {
+                if (event.target === overlay) this.closeConfirm(false);
+            });
+            this.root.appendChild(overlay);
+            this.confirmEl = overlay;
+            confirm.focus();
+            return new Promise((resolve) => {
+                this.confirmResolve = resolve;
+            });
+        }
+
+        closeConfirm(value) {
+            if (!this.confirmEl) return;
+            this.confirmEl.remove();
+            this.confirmEl = null;
+            const resolve = this.confirmResolve;
+            this.confirmResolve = null;
+            resolve?.(value);
+            this.lastFocusedElement?.focus();
+            this.lastFocusedElement = null;
 		}
 		closePreview() {
+            const hadFocus = this.lastFocusedElement;
 			this.modalEl?.remove();
 			this.modalEl = null;
+            hadFocus?.focus();
+            this.lastFocusedElement = null;
 		}
 		mountPlayerControls(playerRoot) {
 			if (this.playerRoot === playerRoot) {
-				this.ensureNativeToggle();
+                this.scheduleNativeToggle();
 				return;
 			}
 			this.teardownPlayerControls();
 			this.playerRoot = playerRoot;
-			this.ensureNativeToggle();
-			this.playerBarObserver = new MutationObserver(() => this.ensureNativeToggle());
+            this.nativeToggleWarned = false;
+            this.scheduleNativeToggle();
+            this.playerBarObserver = new MutationObserver(() => this.scheduleNativeToggle());
 			this.playerBarObserver.observe(playerRoot, {
 				childList: true,
 				subtree: true
@@ -1789,8 +2278,14 @@
 		setSubtitleVisible(visible) {
 			this.subtitleVisible = visible;
 			this.updateStatusPill();
-			if (this.visible && this.activeTab === "subs") this.renderBody();
+            this.requestRender(["subs"]);
 		}
+
+        setPositioning(active) {
+            if (this.positioning === active) return;
+            this.positioning = active;
+            this.requestRender(["style"]);
+        }
 
         findNativeSubtitleControl(root) {
 			const items = root.querySelectorAll(".operate-bar .bar-side > ul > li");
@@ -1805,14 +2300,20 @@
                     mode: "legacy"
                 };
             }
-            const buttons = root.querySelectorAll("button");
-            for (const button of buttons) {
-                if (button.closest("[data-userscript=\"subtitle-toggle\"]")) continue;
-                if (button.textContent?.trim() !== "字幕") continue;
+            const buttons = [...root.querySelectorAll("button")].filter((button) => !button.closest("[data-userscript=\"subtitle-toggle\"]")).filter((button) => button.getBoundingClientRect().width > 0);
+            for (const button of buttons) if (button.textContent?.trim() === "字幕") {
                 const container = button.parentElement;
-                if (!container) continue;
-                if (button.getBoundingClientRect().width <= 0) continue;
-                return {
+                if (container) return {
+                    container,
+                    button,
+                    mode: "modern"
+                };
+            }
+            for (const button of buttons) {
+                const label = `${button.getAttribute("aria-label") ?? ""} ${button.title ?? ""}`.toLowerCase();
+                if (!label.includes("字幕") && !label.includes("subtitle")) continue;
+                const container = button.parentElement;
+                if (container) return {
                     container,
                     button,
                     mode: "modern"
@@ -1823,7 +2324,18 @@
 		ensureNativeToggle() {
 			if (!this.playerRoot) return;
             const native = this.findNativeSubtitleControl(this.playerRoot);
-            if (!native) return;
+            if (!native) {
+                if (!this.nativeToggleWarned) {
+                    this.nativeToggleWarned = true;
+                    const buttons = [...this.playerRoot.querySelectorAll("button, a")].slice(0, 12).map((el) => `${el.tagName.toLowerCase()}:${(el.textContent ?? "").trim().slice(0, 16)}`);
+                    logger.warn("未找到 115 原生字幕按钮，CC 入口暂不可用", {
+                        buttons,
+                        root: this.playerRoot.className
+                    });
+                }
+                return;
+            }
+            this.nativeToggleWarned = false;
             if (this.nativeToggle && this.nativeToggle.container.isConnected && this.nativeToggle.container.previousElementSibling === native.container) return;
             this.nativeToggle?.container.remove();
 			this.nativeToggle = null;
@@ -1882,16 +2394,77 @@
 			const path = event.composedPath();
 			if (this.container && path.includes(this.container)) return;
             if (this.nativeToggle && path.includes(this.nativeToggle.container)) return;
+            if (path.some((node) => node instanceof HTMLElement && node.classList.contains("userscript-subtitle-root"))) return;
+            if (this.positioning) {
+                this.setPositioning(false);
+                this.callbacks.onPositioningChange(false);
+            }
 			this.hide();
 		};
 		handleDocumentKeyDown = (event) => {
+            if (this.confirmEl) {
+                if (event.key === "Escape") {
+                    event.preventDefault();
+                    this.closeConfirm(false);
+                }
+                return;
+            }
+            if (this.handleShortcut(event)) return;
 			if (event.key !== "Escape") return;
 			if (this.modalEl) {
 				this.closePreview();
 				return;
+            }
+            if (this.positioning) {
+                this.setPositioning(false);
+                this.callbacks.onPositioningChange(false);
+                return;
 			}
 			if (this.visible) this.hide();
 		};
+
+        handleShortcut(event) {
+            if (!this.settings?.shortcuts.enabled) return false;
+            if (this.modalEl || this.confirmEl) return false;
+            if (!event.altKey || event.ctrlKey || event.metaKey) return false;
+            if (this.isEditableTarget(event.target)) return false;
+            const sync = this.settings.sync;
+            switch (event.key) {
+                case ",": {
+                    const next = sync.offsetMs - sync.stepMs;
+                    this.callbacks.onOffsetChange(next);
+                    this.showToast(`字幕偏移 ${formatOffset(next)}`);
+                    event.preventDefault();
+                    return true;
+                }
+                case ".": {
+                    const next = sync.offsetMs + sync.stepMs;
+                    this.callbacks.onOffsetChange(next);
+                    this.showToast(`字幕偏移 ${formatOffset(next)}`);
+                    event.preventDefault();
+                    return true;
+                }
+                case "0":
+                    this.callbacks.onOffsetChange(0);
+                    this.showToast("字幕偏移已重置");
+                    event.preventDefault();
+                    return true;
+                case "c":
+                case "C":
+                    this.callbacks.onToggleSubtitle(!this.subtitleVisible);
+                    event.preventDefault();
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        isEditableTarget(target) {
+            if (!(target instanceof HTMLElement)) return false;
+            const tag = target.tagName;
+            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+            return target.isContentEditable || target.closest("[contenteditable=\"true\"]") !== null;
+        }
 		handleViewportChange = () => {
 			if (this.visible) this.positionPanel();
 		};
@@ -1901,6 +2474,8 @@
 			style.textContent = PANEL_CSS;
 			this.root.appendChild(style);
 			const panel = div("panel");
+            panel.setAttribute("role", "dialog");
+            panel.setAttribute("aria-label", "115 字幕助手");
 			const header = div("header");
 			header.appendChild(div("title", "115 字幕助手"));
 			const pill = document.createElement("button");
@@ -1910,20 +2485,33 @@
 				this.subtitleVisible = !this.subtitleVisible;
 				this.updateStatusPill();
 				this.callbacks.onToggleSubtitle(this.subtitleVisible);
-				if (this.visible && this.activeTab === "subs") this.renderBody();
+                this.requestRender(["subs"]);
 			});
 			header.appendChild(pill);
 			this.statusPill = pill;
-			header.appendChild(btn("close", "×", () => this.hide()));
+            const closeButton = btn("close", "×", () => this.hide());
+            closeButton.setAttribute("aria-label", "关闭字幕助手面板");
+            header.appendChild(closeButton);
 			panel.appendChild(header);
 			const tabs = div("tabs");
+            tabs.setAttribute("role", "tablist");
+            tabs.setAttribute("aria-label", "字幕助手面板");
+            tabs.addEventListener("keydown", this.handleTabKeyDown);
 			for (const tab of TABS) {
 				const el = btn("tab", tab.label, () => this.setActiveTab(tab.id));
+                el.id = `userscript-tab-${tab.id}`;
+                el.setAttribute("role", "tab");
+                el.setAttribute("aria-controls", "userscript-tabpanel");
+                el.setAttribute("aria-selected", "false");
+                el.tabIndex = -1;
 				tabs.appendChild(el);
 				this.tabEls.set(tab.id, el);
 			}
 			panel.appendChild(tabs);
 			const body = div("body");
+            body.id = "userscript-tabpanel";
+            body.setAttribute("role", "tabpanel");
+            body.tabIndex = 0;
 			panel.appendChild(body);
 			this.root.appendChild(panel);
 			this.panelEl = panel;
@@ -1933,9 +2521,29 @@
 		}
 		setActiveTab(tab) {
 			this.activeTab = tab;
-			for (const [id, el] of this.tabEls) el.classList.toggle("active", id === tab);
-			this.renderBody();
-		}
+            for (const [id, el] of this.tabEls) {
+                const active = id === tab;
+                el.classList.toggle("active", active);
+                el.setAttribute("aria-selected", String(active));
+                el.tabIndex = active ? 0 : -1;
+            }
+            this.bodyEl?.setAttribute("aria-labelledby", `userscript-tab-${tab}`);
+            this.scheduleRender();
+        }
+
+        handleTabKeyDown = (event) => {
+            const currentIndex = TABS.findIndex((item) => item.id === this.activeTab);
+            let nextIndex = null;
+            if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + TABS.length) % TABS.length;
+            else if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % TABS.length;
+            else if (event.key === "Home") nextIndex = 0;
+            else if (event.key === "End") nextIndex = TABS.length - 1;
+            if (nextIndex === null) return;
+            event.preventDefault();
+            const next = TABS[nextIndex];
+            this.setActiveTab(next.id);
+            this.tabEls.get(next.id)?.focus();
+        };
 		updateStatusPill() {
 			if (!this.statusPill) return;
 			this.statusPill.textContent = this.subtitleVisible ? "字幕：开" : "字幕：关";
@@ -1944,6 +2552,23 @@
 			this.statusPill.setAttribute("aria-pressed", String(this.subtitleVisible));
 			this.statusPill.title = this.subtitleVisible ? "点击隐藏字幕" : "点击显示字幕";
 		}
+
+        requestRender(tabs) {
+            if (!this.visible) return;
+            if (tabs && !tabs.includes(this.activeTab)) return;
+            this.scheduleRender();
+        }
+
+        scheduleRender() {
+            if (!this.bodyEl || this.renderScheduled) return;
+            this.renderScheduled = true;
+            const run = () => {
+                this.renderScheduled = false;
+                this.renderBody();
+            };
+            if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+            else queueMicrotask(run);
+        }
 		renderBody() {
 			if (!this.bodyEl) return;
 			this.bodyEl.replaceChildren();
@@ -1990,6 +2615,7 @@
 			codeInput.type = "text";
 			codeInput.className = "input";
 			codeInput.placeholder = "输入番号后搜索";
+            codeInput.setAttribute("aria-label", "番号");
 			codeInput.value = this.codeDraft ?? this.identity?.code ?? "";
 			codeInput.addEventListener("input", () => {
 				this.codeDraft = codeInput.value;
@@ -2007,12 +2633,14 @@
 			searchSection.appendChild(searchRow);
             const autoRow = div("row");
             autoRow.appendChild(div("field-label", "无缓存自动搜"));
-            const autoBtn = btn("btn btn-ghost btn-sm", this.settings?.autoSearch ?? true ? "已开启" : "已关闭", () => {
+            const autoOn = this.settings?.autoSearch ?? true;
+            const autoBtn = btn("btn btn-ghost btn-sm", autoOn ? "已开启" : "已关闭", () => {
                 const next = !(this.settings?.autoSearch ?? true);
                 autoBtn.textContent = next ? "已开启" : "已关闭";
                 this.callbacks.onAutoSearchChange(next);
             });
             autoBtn.title = "先恢复该视频的缓存；没有缓存时才自动搜索，但不会自动使用搜索结果";
+            autoBtn.setAttribute("aria-pressed", String(autoOn));
             const autoHint = div("value", "仅搜索，不自动使用");
             autoHint.style.minWidth = "0";
             autoHint.style.flex = "1";
@@ -2079,6 +2707,7 @@
 				section.appendChild(this.createSubtitleRow({
 					title: result.title,
 					meta,
+                    reasons: result.matchReasons,
 					actions: [
 						{
 							label: "使用",
@@ -2200,6 +2829,23 @@
 			shadowRow.appendChild(shadowToggle);
 			toggleSection.appendChild(shadowRow);
 			pane.appendChild(toggleSection);
+            const positionSection = div("section");
+            const positionRow = div("row");
+            const positionBtn = btn("btn btn-ghost btn-sm", this.positioning ? "完成定位" : "调整位置", () => {
+                const next = !this.positioning;
+                this.setPositioning(next);
+                this.callbacks.onPositioningChange(next);
+            });
+            positionBtn.setAttribute("aria-pressed", String(this.positioning));
+            positionRow.appendChild(positionBtn);
+            const positionHint = div("value", "拖动字幕到目标位置");
+            positionHint.style.minWidth = "0";
+            positionHint.style.flex = "1";
+            positionHint.style.textAlign = "left";
+            positionRow.appendChild(positionHint);
+            positionSection.appendChild(positionRow);
+            positionSection.appendChild(div("info", "定位模式会临时让字幕接收指针事件；按 Esc 或再次点击「完成定位」退出。"));
+            pane.appendChild(positionSection);
 			return pane;
 		}
 		renderSyncTab() {
@@ -2218,6 +2864,7 @@
 			slider.step = "100";
 			slider.value = String(offset);
 			slider.className = "slider";
+            slider.setAttribute("aria-label", "字幕时间偏移");
 			const value = div("value", formatOffset(offset));
 			slider.addEventListener("input", () => {
 				value.textContent = formatOffset(Number(slider.value));
@@ -2236,6 +2883,32 @@
 			stepRow.appendChild(btn("btn btn-ghost btn-sm", "重置", () => this.callbacks.onOffsetChange(0)));
 			section.appendChild(stepRow);
 			pane.appendChild(section);
+            const providerSection = div("section");
+            providerSection.appendChild(div("section-title", "字幕来源"));
+            const checkRow = div("row");
+            checkRow.appendChild(btn("btn btn-ghost btn-sm", "检测来源", () => this.callbacks.onCheckProviders()));
+            const checkHint = div("value", "检查迅雷字幕 / SubtitleCat 是否可访问");
+            checkHint.style.minWidth = "0";
+            checkHint.style.flex = "1";
+            checkHint.style.textAlign = "left";
+            checkRow.appendChild(checkHint);
+            providerSection.appendChild(checkRow);
+            pane.appendChild(providerSection);
+            const shortcutSection = div("section");
+            shortcutSection.appendChild(div("section-title", "快捷键"));
+            const shortcutRow = div("row");
+            shortcutRow.appendChild(div("field-label", "字幕快捷键"));
+            const shortcutEnabled = this.settings?.shortcuts.enabled ?? true;
+            const shortcutToggle = btn("btn btn-ghost btn-sm", shortcutEnabled ? "已开启" : "已关闭", () => {
+                const next = !(this.settings?.shortcuts.enabled ?? true);
+                shortcutToggle.textContent = next ? "已开启" : "已关闭";
+                this.callbacks.onShortcutChange(next);
+            });
+            shortcutToggle.setAttribute("aria-pressed", String(shortcutEnabled));
+            shortcutRow.appendChild(shortcutToggle);
+            shortcutSection.appendChild(shortcutRow);
+            shortcutSection.appendChild(div("info", "Alt+, / Alt+. 调整偏移，Alt+0 重置，Alt+C 开关字幕；输入框中不生效。"));
+            pane.appendChild(shortcutSection);
 			return pane;
 		}
 		renderCacheTab() {
@@ -2245,7 +2918,8 @@
             const total = this.cacheSummary;
             const currentCount = this.cachedSubtitles.length;
             const remoteText = this.remoteSummary.count > 0 ? `；其他播放域名 ${this.remoteSummary.count} 条 / ${formatSize(this.remoteSummary.bytes)}` : "";
-            const summaryText = (total.count === currentCount ? `本地缓存共 ${total.count} 条字幕，共 ${formatSize(total.bytes)}` : `本地缓存共 ${total.count} 条字幕，共 ${formatSize(total.bytes)}；当前视频 ${currentCount} 条`) + remoteText;
+            const limitText = this.settings ? `；容量上限 ${formatSize(this.settings.cache.maxBytes)}` : "";
+            const summaryText = (total.count === currentCount ? `本地缓存共 ${total.count} 条字幕，共 ${formatSize(total.bytes)}` : `本地缓存共 ${total.count} 条字幕，共 ${formatSize(total.bytes)}；当前视频 ${currentCount} 条`) + remoteText + limitText;
             section.appendChild(div("info", summaryText));
             if (this.remoteSummary.count > 0) section.appendChild(div("info", `已通过 GM 同步索引：${this.remoteSummary.origins.join("、")}`));
             if (currentCount > 0) {
@@ -2267,7 +2941,9 @@
             } else section.appendChild(div("empty", "当前视频还没有缓存字幕"));
             const dedupeRow = div("row");
             dedupeRow.appendChild(btn("btn btn-ghost btn-sm", "缓存字幕去重", () => {
-                if (confirm("将按番号合并缓存：同一番号只保留最新的一份字幕，较旧的记录会被删除。\n该操作不可撤销，确定继续？")) this.callbacks.onDeduplicateCache();
+                this.showConfirm("将按番号合并缓存：同一番号只保留最新的一份字幕，较旧的记录会被删除。\n该操作不可撤销，确定继续？").then((ok) => {
+                    if (ok) this.callbacks.onDeduplicateCache();
+                });
             }));
             const dedupeHint = div("value", "同一番号只保留最新");
             dedupeHint.style.minWidth = "0";
@@ -2275,9 +2951,52 @@
             dedupeHint.style.textAlign = "left";
             dedupeRow.appendChild(dedupeHint);
             section.appendChild(dedupeRow);
+            const cleanupRow = div("row");
+            cleanupRow.appendChild(btn("btn btn-ghost btn-sm", "清理未使用缓存", () => {
+                const days = this.settings?.cache.cleanupAfterDays ?? 90;
+                this.showConfirm(`将删除超过 ${days} 天未使用、且非当前播放的字幕，确定继续？`).then((ok) => {
+                    if (ok) this.callbacks.onCleanupCache();
+                });
+            }));
+            const cleanupHint = div("value", `超过 ${this.settings?.cache.cleanupAfterDays ?? 90} 天未使用`);
+            cleanupHint.style.minWidth = "0";
+            cleanupHint.style.flex = "1";
+            cleanupHint.style.textAlign = "left";
+            cleanupRow.appendChild(cleanupHint);
+            section.appendChild(cleanupRow);
+            const syncRow = div("row");
+            syncRow.appendChild(btn("btn btn-ghost btn-sm", "刷新同步索引", () => this.callbacks.onRefreshSync()));
+            const syncHint = div("value", "重新发布本地索引并读取其他播放域名");
+            syncHint.style.minWidth = "0";
+            syncHint.style.flex = "1";
+            syncHint.style.textAlign = "left";
+            syncRow.appendChild(syncHint);
+            section.appendChild(syncRow);
+            const remoteClearRow = div("row");
+            remoteClearRow.appendChild(btn("btn btn-ghost btn-sm", "清理远程索引", () => {
+                this.showConfirm("将删除 GM 存储中其他播放域名的缓存索引，不会删除任何本地字幕。确定继续？").then((ok) => {
+                    if (ok) this.callbacks.onClearRemoteSync();
+                });
+            }));
+            const remoteClearHint = div("value", "只删同步索引，不删本地字幕");
+            remoteClearHint.style.minWidth = "0";
+            remoteClearHint.style.flex = "1";
+            remoteClearHint.style.textAlign = "left";
+            remoteClearRow.appendChild(remoteClearHint);
+            section.appendChild(remoteClearRow);
+            const backfillRow = div("row");
+            backfillRow.appendChild(btn("btn btn-ghost btn-sm", "补齐来源信息", () => this.callbacks.onBackfillSources()));
+            const backfillHint = div("value", "为旧缓存补上下载地址，便于跨域名恢复");
+            backfillHint.style.minWidth = "0";
+            backfillHint.style.flex = "1";
+            backfillHint.style.textAlign = "left";
+            backfillRow.appendChild(backfillHint);
+            section.appendChild(backfillRow);
 			const clearRow = div("row");
 			clearRow.appendChild(btn("btn btn-danger btn-sm", "清空全部缓存", () => {
-				if (confirm("确定清空所有字幕缓存？该操作不可撤销。")) this.callbacks.onClearCache();
+                this.showConfirm("确定清空所有字幕缓存？该操作不可撤销。").then((ok) => {
+                    if (ok) this.callbacks.onClearCache();
+                });
 			}));
             const exportBtn = btn("btn btn-ghost btn-sm", "导出所有字幕", () => this.callbacks.onExportAll());
             exportBtn.disabled = total.count === 0;
@@ -2323,6 +3042,7 @@
 			slider.max = String(max);
 			slider.step = String(step);
 			slider.value = String(value);
+            slider.setAttribute("aria-label", label);
 			const valueEl = div("value", String(value));
 			slider.addEventListener("input", () => {
 				const next = Number(slider.value);
@@ -2339,6 +3059,7 @@
 			const input = document.createElement("input");
 			input.type = "color";
 			input.value = value;
+            input.setAttribute("aria-label", label);
 			input.style.width = "44px";
 			input.style.height = "26px";
 			input.style.padding = "0";
@@ -2370,7 +3091,8 @@
             const head = div("result-head");
             const titleWrap = div("result-title-wrap");
 			const titleEl = div("result-title", opts.title);
-            titleEl.title = opts.title;
+            const reasons = opts.reasons?.filter(Boolean) ?? [];
+            titleEl.title = reasons.length > 0 ? `${opts.title}\n匹配原因：${reasons.join("；")}` : opts.title;
             titleWrap.appendChild(titleEl);
 			if (active) {
 				const badge = document.createElement("span");
@@ -2387,6 +3109,7 @@
 				const alreadyActive = active && action.primary;
 				if (alreadyActive) classes.push("btn-active");
 				const button = btn(classes.join(" "), alreadyActive ? "已使用" : action.label, action.onClick);
+                button.title = action.title ?? action.label;
 				if (alreadyActive) button.disabled = true;
 				actions.appendChild(button);
 			}
@@ -2399,6 +3122,9 @@
 			if (!this.root) return;
 			this.clearToast();
 			const el = div(tone === "warn" ? "toast warn" : "toast", message);
+            el.setAttribute("role", "status");
+            el.setAttribute("aria-live", "polite");
+            el.setAttribute("aria-atomic", "true");
 			this.root.appendChild(el);
 			this.toastEl = el;
 			el.offsetWidth;
@@ -2476,6 +3202,7 @@
 			window.removeEventListener("resize", this.handleViewportChange);
 			window.removeEventListener("scroll", this.handleViewportChange, true);
 			this.closePreview();
+            this.closeConfirm(false);
 			this.clearToast();
 			this.container?.remove();
 			this.container = null;
@@ -2561,7 +3288,6 @@
 		enabled: true,
         autoSearch: true,
 		autoLoadCachedSubtitle: true,
-		autoSelectHighConfidence: false,
 		preferredLanguages: [
 			"zh-CN",
 			"zh-TW",
@@ -2753,16 +3479,30 @@
 		}
 		return out;
 	}
+
+    var PROVIDER_COOLDOWN_MS = 6e4;
 	var SubtitleSearchEngine = class {
+        providerCooldownUntil = new Map();
 		async search(query, settings, callbacks) {
-			const providers = providerManager.getEnabled(settings).filter((p) => p.id !== "local");
-			if (providers.length === 0) return [];
+            const allProviders = providerManager.getEnabled(settings).filter((p) => p.id !== "local");
+            const now = Date.now();
+            const providers = allProviders.filter((provider) => query.force || (this.providerCooldownUntil.get(provider.id) ?? 0) <= now);
+            if (allProviders.length === 0) return [];
 			const providerStates = {};
-			for (const p of providers) providerStates[p.id] = {
-				providerId: p.id,
-				status: "pending",
-				resultCount: 0
-			};
+            for (const provider of allProviders) {
+                const coolingDown = !providers.includes(provider);
+                providerStates[provider.id] = coolingDown ? {
+                    providerId: provider.id,
+                    status: "error",
+                    errorMessage: "最近请求失败，自动搜索暂缓 60 秒；可手动搜索重试",
+                    errorCode: "PROVIDER_NETWORK_ERROR",
+                    resultCount: 0
+                } : {
+                    providerId: provider.id,
+                    status: "pending",
+                    resultCount: 0
+                };
+            }
 			let allResults = [];
 			const controller = new AbortController();
 			const signal = query.signal;
@@ -2779,6 +3519,7 @@
 						...query,
 						signal: controller.signal
 					}), this.timeout(12e3, provider.id)]);
+                    this.providerCooldownUntil.delete(provider.id);
 					providerStates[provider.id].status = result.length > 0 ? "success" : "no-results";
 					providerStates[provider.id].resultCount = result.length;
 					const scored = result.map((r) => {
@@ -2801,7 +3542,10 @@
 					} else {
 						providerStates[provider.id].status = "error";
 						providerStates[provider.id].errorMessage = e instanceof Error ? e.message : "未知错误";
-                        if (isSubtitleError(e)) providerStates[provider.id].errorCode = e.code;
+                        if (isSubtitleError(e)) {
+                            providerStates[provider.id].errorCode = e.code;
+                            if (e.code === "PROVIDER_NETWORK_ERROR" || e.code === "PROVIDER_TIMEOUT") this.providerCooldownUntil.set(provider.id, Date.now() + PROVIDER_COOLDOWN_MS);
+                        }
 						logger.warn(`Provider ${provider.id} 搜索失败`, e);
 					}
 				}
@@ -3113,7 +3857,7 @@
     }
 
     function dosDateTime(timestamp) {
-        const date = new Date(Number.isFinite(timestamp) ? timestamp : Date.now());
+        const date = new Date(isFiniteNumber(timestamp) ? timestamp : Date.now());
         const year = Math.max(1980, date.getFullYear());
         return {
             time: date.getHours() << 11 | date.getMinutes() << 5 | Math.floor(date.getSeconds() / 2),
@@ -3256,6 +4000,10 @@
         };
     }
 
+    function subtitleSize(record) {
+        return "size" in record ? record.size : record.rawBlob?.size ?? 0;
+    }
+
     function toSyncedSubtitle(record) {
         return {
             id: record.id,
@@ -3268,10 +4016,9 @@
             format: record.format,
             cueCount: record.cueCount,
             checksum: record.checksum,
-            size: record.rawBlob?.size ?? 0,
+            size: subtitleSize(record),
             createdAt: record.createdAt,
             lastUsedAt: record.lastUsedAt,
-            isFavorite: record.isFavorite,
             sourceResult: sanitizeSourceResult(record.sourceResult)
         };
     }
@@ -3354,7 +4101,6 @@
             size: asNumber(value.size),
             createdAt: asNumber(value.createdAt),
             lastUsedAt: asNumber(value.lastUsedAt),
-            isFavorite: value.isFavorite === true,
             sourceResult: normalizeSourceResult(value.sourceResult)
         };
     }
@@ -3373,7 +4119,7 @@
         };
     }
 
-    function normalizePayload(raw) {
+    function normalizePayload$1(raw) {
         const empty = {
             version: SYNC_VERSION,
             buckets: {}
@@ -3409,7 +4155,7 @@
 
         async publish() {
             try {
-                const [subtitles, videos] = await Promise.all([subtitleRepository.getAll(), subtitleRepository.getAllVideoRecords()]);
+                const [subtitles, videos] = await Promise.all([subtitleRepository.getAllMetadata(), subtitleRepository.getAllVideoRecords()]);
                 const payload = this.readPayload();
                 payload.buckets[this.origin] = buildSyncBucket(subtitles, videos);
                 writeStoredValue(SYNC_KEY, payload);
@@ -3422,6 +4168,7 @@
             const payload = this.readPayload();
             const byId = new Map();
             let selected = null;
+            let selectedUpdatedAt = -1;
             for (const [origin, bucket] of Object.entries(payload.buckets)) {
                 if (origin === this.origin) continue;
                 const subtitles = bucket.subtitles.filter((sub) => matchesVideo(sub.videoKey, videoKey, fileId));
@@ -3437,10 +4184,13 @@
                     if (!matchesVideo(video.videoKey, videoKey, fileId)) continue;
                     const sub = subtitles.find((item) => item.id === video.selectedSubtitleId);
                     if (!sub) continue;
-                    if (!selected || sub.lastUsedAt > selected.lastUsedAt) selected = {
-                        ...sub,
-                        origin
-                    };
+                    if (video.updatedAt > selectedUpdatedAt) {
+                        selected = {
+                            ...sub,
+                            origin
+                        };
+                        selectedUpdatedAt = video.updatedAt;
+                    }
                 }
             }
             return {
@@ -3472,11 +4222,143 @@
             };
         }
 
+        clearRemoteOrigins() {
+            const payload = this.readPayload();
+            const removed = [];
+            for (const origin of Object.keys(payload.buckets)) {
+                if (origin === this.origin) continue;
+                delete payload.buckets[origin];
+                removed.push(origin);
+            }
+            if (removed.length > 0) writeStoredValue(SYNC_KEY, payload);
+            return removed;
+        }
+
+        watch(callback) {
+            if (typeof GM_addValueChangeListener !== "function") return () => void 0;
+            try {
+                const listenerId = GM_addValueChangeListener(SYNC_KEY, (_name, _oldValue, _newValue, remote) => {
+                    if (remote) callback();
+                });
+                return () => {
+                    try {
+                        if (typeof GM_removeValueChangeListener === "function") GM_removeValueChangeListener(listenerId);
+                    } catch {
+                    }
+                };
+            } catch (e) {
+                logger.warn("注册 GM 存储变化监听失败，将使用轮询", e);
+                return () => void 0;
+            }
+        }
+
         readPayload() {
-            return normalizePayload(readStoredValue(SYNC_KEY, null));
+            return normalizePayload$1(readStoredValue(SYNC_KEY, null));
         }
     };
     var metadataSync = new MetadataSyncService();
+    var AUTO_SEARCH_CACHE_KEY = "autoSearchCache.v1";
+    var MAX_ENTRIES = 20;
+
+    function normalizeCode(code) {
+        return code.trim().toUpperCase().replace(/\s+/g, "");
+    }
+
+    function normalizeFileName(name) {
+        if (!name) return "";
+        return name.trim().toLowerCase().replace(/\s+/g, " ");
+    }
+
+    function buildAutoSearchCacheKey(input) {
+        const code = normalizeCode(input.code);
+        if (!code) return "";
+        if (input.duration !== void 0 && isFiniteNumber(input.duration) && input.duration > 0) return `${code}|dur:${Math.floor(input.duration / 60)}`;
+        const fileName = normalizeFileName(input.fileName);
+        return fileName ? `${code}|name:${fileName}` : `${code}|name:unknown`;
+    }
+
+    function emptyPayload() {
+        return {
+            version: 1,
+            entries: {}
+        };
+    }
+
+    function normalizePayload(raw) {
+        if (!raw || typeof raw !== "object") return emptyPayload();
+        const value = raw;
+        if (value.version !== 1 || !value.entries || typeof value.entries !== "object") return emptyPayload();
+        const entries = {};
+        for (const [key, entry] of Object.entries(value.entries)) {
+            if (!key || !entry || typeof entry !== "object") continue;
+            const savedAt = entry.savedAt;
+            const results = entry.results;
+            if (typeof savedAt !== "number" || !Array.isArray(results)) continue;
+            entries[key] = {
+                savedAt,
+                results: results.filter(isSearchResult)
+            };
+        }
+        return {
+            version: 1,
+            entries
+        };
+    }
+
+    function isSearchResult(value) {
+        if (!value || typeof value !== "object") return false;
+        const item = value;
+        return typeof item.providerId === "string" && typeof item.sourceId === "string" && typeof item.title === "string" && typeof item.format === "string";
+    }
+
+    var AutoSearchCache = class {
+        now;
+
+        constructor(now = () => Date.now()) {
+            this.now = now;
+        }
+
+        read(key) {
+            if (!key) return null;
+            try {
+                const payload = normalizePayload(readStoredValue(AUTO_SEARCH_CACHE_KEY, null));
+                const entry = payload.entries[key];
+                if (!entry) return null;
+                if (this.now() - entry.savedAt > 9e5) {
+                    delete payload.entries[key];
+                    this.writePayload(payload);
+                    return null;
+                }
+                return entry.results;
+            } catch {
+                return null;
+            }
+        }
+
+        write(key, results) {
+            if (!key) return;
+            try {
+                const payload = normalizePayload(readStoredValue(AUTO_SEARCH_CACHE_KEY, null));
+                payload.entries[key] = {
+                    savedAt: this.now(),
+                    results
+                };
+                const ordered = Object.entries(payload.entries).sort((a, b) => b[1].savedAt - a[1].savedAt).slice(0, MAX_ENTRIES);
+                payload.entries = Object.fromEntries(ordered);
+                this.writePayload(payload);
+            } catch {
+            }
+        }
+
+        clear() {
+            writeStoredValue(AUTO_SEARCH_CACHE_KEY, emptyPayload());
+        }
+
+        writePayload(payload) {
+            writeStoredValue(AUTO_SEARCH_CACHE_KEY, payload);
+        }
+    };
+    var autoSearchCache = new AutoSearchCache();
 	async function bootstrap() {
 		logger.info("115 Subtitle Assistant 启动中...");
 		const settings = await settingsService.load();
@@ -3488,7 +4370,7 @@
 		const adapter = m115VideoAdapter;
 		const panel = new SubtitlePanel({
 			onImportFile: (file) => handleImportFile(file),
-			onSearch: (code) => handleSearch(code),
+            onSearch: (code) => void handleManualSearch(code),
 			onSelectResult: (result) => handleSelectResult(result),
 			onPreviewResult: (result) => handlePreviewResult(result),
 			onDownloadResult: (result) => handleDownloadResult(result),
@@ -3501,25 +4383,74 @@
 				panel.setSubtitleVisible(enabled);
 			},
             onAutoSearchChange: (enabled) => void handleAutoSearchChange(enabled),
+            onShortcutChange: (enabled) => void handleShortcutChange(enabled),
 			onClearCache: () => handleClearCache(),
             onDeleteSubtitle: (id) => handleDeleteSubtitle(id),
+            onCleanupCache: () => void handleCleanupCache(),
             onDeduplicateCache: () => void handleDeduplicateCache(),
-            onExportAll: () => void handleExportAll()
+            onExportAll: () => void handleExportAll(),
+            onRefreshSync: () => void handleRefreshSync(),
+            onClearRemoteSync: () => void handleClearRemoteSync(),
+            onPositioningChange: (enabled) => handlePositioningChange(enabled),
+            onCheckProviders: () => void handleCheckProviders(),
+            onBackfillSources: () => void handleBackfillSources()
 		});
 		let lastAutoSearchKey = "";
         let autoSearchGeneration = 0;
         let searchEpoch = 0;
 		let currentSettings = settings;
         let lastVideoToken = "";
+        let currentManualCode = "";
+        let manualCodeLoadedFor = "";
+        let localSubtitleIds = new Set();
         let lastRemoteRestoreToken = "";
+        let activeSearchAbort = null;
+        let searchRequestId = 0;
+        const activeDownloads = new Set();
+
+        function beginDownload() {
+            const controller = new AbortController();
+            activeDownloads.add(controller);
+            return controller;
+        }
+
+        function endDownload(controller) {
+            activeDownloads.delete(controller);
+        }
+
+        function abortActiveRequests() {
+            activeSearchAbort?.abort();
+            activeSearchAbort = null;
+            for (const controller of activeDownloads) controller.abort();
+            activeDownloads.clear();
+        }
+
+        function showWarning(message) {
+            panel.showToast(message, "warn");
+        }
 
         function identityToken(identity) {
             if (!identity) return "";
             return identity.fileId ? `id:${identity.fileId}` : identity.videoKey;
         }
 
+        let publishTimer = null;
+        let lastCacheCheckAt = 0;
+
         function publishMetadata() {
-            metadataSync.publish();
+            if (publishTimer !== null) window.clearTimeout(publishTimer);
+            publishTimer = window.setTimeout(() => {
+                publishTimer = null;
+                metadataSync.publish();
+            }, 300);
+        }
+
+        async function publishMetadataNow() {
+            if (publishTimer !== null) {
+                window.clearTimeout(publishTimer);
+                publishTimer = null;
+            }
+            await metadataSync.publish();
         }
 		const controller = new PlayerController(adapter, {
 			onVideoChange: (identity) => {
@@ -3529,11 +4460,22 @@
                     lastVideoToken = token;
                     lastAutoSearchKey = "";
                     lastRemoteRestoreToken = "";
+                    currentManualCode = "";
+                    manualCodeLoadedFor = "";
                     searchEpoch++;
+                    abortActiveRequests();
+                    controller.setPositioningMode(false);
+                    panel.setPositioning(false);
                     panel.setProgress(null);
                 }
 				panel.setIdentity(identity);
+                if (currentManualCode) panel.setIdentity({
+                    ...identity,
+                    code: currentManualCode,
+                    source: "manual"
+                });
 				refreshCacheList();
+                loadManualCode(identity);
 			},
 			onPlayerContextAttached: (ctx) => {
 				panel.mountPlayerControls(ctx.playerRoot);
@@ -3548,6 +4490,16 @@
             },
             onCacheRestoreSettled: (identity, restored) => {
                 if (!restored) handleCacheMiss(identity);
+            },
+            resolveCachedSubtitle: (record) => ensureCurrentParser(record),
+            onOverlayUnsupported: (reason) => {
+                panel.showToast(`${reason}；请退出全屏或使用网页全屏`, "warn");
+            },
+            onPositionChange: (xPercent, yPercent) => {
+                handleStyleChange({
+                    xPercent: Math.round(xPercent * 10) / 10,
+                    yPercent: Math.round(yPercent * 10) / 10
+                }).then(() => panel.setSettings(currentSettings, true));
 			}
 		});
 		controller.setSettings(settings);
@@ -3557,15 +4509,110 @@
 		controller.start();
         refreshCacheList();
         publishMetadata();
+        let syncWatchTimer = null;
+        metadataSync.watch(() => {
+            if (!panel.isOpen()) return;
+            if (syncWatchTimer !== null) window.clearTimeout(syncWatchTimer);
+            syncWatchTimer = window.setTimeout(() => {
+                syncWatchTimer = null;
+                refreshRemoteCache();
+            }, 150);
+        });
+        window.setInterval(() => {
+            if (document.visibilityState === "visible" && panel.isOpen()) refreshRemoteCache();
+        }, 15e3);
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible" && panel.isOpen()) refreshRemoteCache();
+        });
 
         function applySubtitle(title, subtitleId, cues, note) {
 			controller.selectSubtitle(subtitleId, cues);
 			controller.setSubtitleVisible(true);
 			panel.setSubtitleVisible(true);
 			panel.setCurrentSubtitle(title, subtitleId);
+            logger.info(`应用字幕：${title}（${cues.length} 条）`);
 			const hasCueNow = controller.getActiveCueCount() > 0;
             const suffix = note ? `（${note}）` : "";
             panel.showToast(hasCueNow ? `已使用：${title}${suffix}` : `已使用：${title}${suffix}（当前时间点没有字幕，拖动进度条查看）`, hasCueNow ? "success" : "warn");
+        }
+
+        async function ensureCurrentParser(record) {
+            if (record.parserVersion >= 2) return record;
+            if (record.format === "ass" || record.format === "ssa") return record;
+            try {
+                const parsed = parseSubtitle(await record.rawBlob.arrayBuffer(), record.format, record.encoding);
+                const updated = {
+                    ...record,
+                    cues: parsed.cues,
+                    cueCount: parsed.cues.length,
+                    encoding: parsed.encoding,
+                    parserVersion: 2
+                };
+                await subtitleRepository.save(updated);
+                logger.info(`已按解析器 v2 重新解析缓存字幕：${record.title}`);
+                return updated;
+            } catch (e) {
+                logger.warn(`重新解析缓存字幕失败，保留原记录：${record.title}`, e);
+                return record;
+            }
+        }
+
+        async function loadManualCode(identity) {
+            if (!identity.videoKey || manualCodeLoadedFor === identity.videoKey) return;
+            manualCodeLoadedFor = identity.videoKey;
+            try {
+                const record = await subtitleRepository.getVideoRecord(identity.videoKey);
+                const current = controller.getCurrentIdentity();
+                if (!current || current.videoKey !== identity.videoKey) return;
+                if (record?.codeSource === "manual" && record.code) {
+                    currentManualCode = record.code;
+                    panel.setIdentity({
+                        ...current,
+                        code: record.code,
+                        source: "manual"
+                    });
+                }
+            } catch (e) {
+                logger.warn("读取手动番号失败", e);
+            }
+        }
+
+        async function persistManualCode(identity, code) {
+            const token = identityToken(identity);
+            const stable = await waitForStableIdentity(token, 3e3);
+            if (!stable || identityToken(controller.getCurrentIdentity()) !== token) return;
+            try {
+                await subtitleRepository.setManualCode(stable.videoKey, code);
+                manualCodeLoadedFor = stable.videoKey;
+                publishMetadata();
+            } catch (e) {
+                logger.warn("保存手动番号失败", e);
+            }
+        }
+
+        async function handleManualSearch(code) {
+            const trimmed = code.trim();
+            if (!trimmed) {
+                showWarning("请输入番号");
+                return;
+            }
+            const identity = controller.getCurrentIdentity();
+            const autoCode = identity?.code ?? "";
+            const isManualCorrection = !autoCode || trimmed.toUpperCase() !== autoCode.toUpperCase();
+            if (identity && isManualCorrection) {
+                currentManualCode = trimmed;
+                panel.setIdentity({
+                    ...identity,
+                    code: trimmed,
+                    source: "manual"
+                });
+                persistManualCode(identity, trimmed);
+            }
+            lastAutoSearchKey = "";
+            await handleSearch(trimmed, identity, {
+                cacheResults: true,
+                forceProviders: true
+            });
         }
 
         async function replaceCachedByCode(code, keepId) {
@@ -3584,20 +4631,25 @@
 				const { bytes, fileName } = await localFileProvider.fromFile(file);
 				const format = detectFormat(fileName);
 				if (format === "unknown") {
-					alert("不支持的字幕格式");
+                    showWarning("不支持的字幕格式");
+                    return;
+                }
+                if (format === "ass" || format === "ssa") {
+                    showWarning("暂不支持 ASS/SSA 字幕解析，请导入 SRT/VTT 文件。");
 					return;
 				}
 				const parsed = parseSubtitle(bytes, format);
 				const identity = controller.getCurrentIdentity();
 				if (!identity) {
-					alert("未检测到视频");
+                    showWarning("未检测到视频");
 					return;
 				}
 				const checksum = await computeChecksum(bytes);
                 const duplicate = await subtitleRepository.findByChecksum(identity.videoKey, checksum);
                 if (duplicate) {
-                    await subtitleRepository.setSelectedForVideo(identity.videoKey, duplicate.id);
-                    applySubtitle(duplicate.title, duplicate.id, duplicate.cues, "缓存命中");
+                    const current = await ensureCurrentParser(duplicate);
+                    await subtitleRepository.setSelectedForVideo(identity.videoKey, current.id);
+                    applySubtitle(current.title, current.id, current.cues, "缓存命中");
                     refreshCacheList();
                     publishMetadata();
                     return;
@@ -3605,7 +4657,7 @@
 				const record = {
 					id: uuid(),
 					videoKey: identity.videoKey,
-					code: identity.code ?? "",
+                    code: currentManualCode || identity.code || "",
 					providerId: "local",
 					title: fileName,
 					format,
@@ -3616,8 +4668,7 @@
 					checksum,
 					createdAt: Date.now(),
 					lastUsedAt: Date.now(),
-					parserVersion: 1,
-					isFavorite: false
+                    parserVersion: 2
 				};
 				await subtitleRepository.save(record);
                 const replaced = await replaceCachedByCode(record.code, record.id);
@@ -3625,58 +4676,82 @@
                 applySubtitle(fileName, record.id, parsed.cues, replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : void 0);
 				refreshCacheList();
                 publishMetadata();
+                enforceCacheLimit();
 				logger.info(`已加载本地字幕：${fileName}（${parsed.cues.length} 条）`);
 			} catch (e) {
-				const msg = isSubtitleError(e) ? e.message : "导入字幕失败";
-				alert(msg);
+                showWarning(isSubtitleError(e) ? e.message : "导入字幕失败");
 				logger.error("导入字幕失败", e);
 			}
 		}
 
-        async function handleSearch(code, origin = controller.getCurrentIdentity()) {
+        async function handleSearch(code, origin = controller.getCurrentIdentity(), options = {}) {
 			if (!code) {
-				alert("请输入番号");
+                showWarning("请输入番号");
                 return [];
 			}
+            activeSearchAbort?.abort();
+            const abort = new AbortController();
+            activeSearchAbort = abort;
+            const requestId = ++searchRequestId;
             const identity = origin;
             const originEpoch = searchEpoch;
             const originToken = identityToken(identity);
-            const stillCurrent = () => originEpoch === searchEpoch && identityToken(controller.getCurrentIdentity()) === originToken;
+            const stillCurrent = () => requestId === searchRequestId && originEpoch === searchEpoch && identityToken(controller.getCurrentIdentity()) === originToken;
 			let latest = {
 				providerStates: {},
 				results: [],
 				done: false
 			};
-			const results = await subtitleSearchEngine.search({
-				code,
-				normalizedCode: code.toUpperCase(),
-				fileName: identity?.originalFileName,
-				duration: identity?.duration,
-				languagePreferences: currentSettings.preferredLanguages
-			}, currentSettings, { onProgress: (progress) => {
-				latest = progress;
-                    if (stillCurrent()) panel.setProgress(progress);
-			} });
-            if (stillCurrent()) panel.setProgress({
-				...latest,
-				results,
-				done: true
-			});
-            return results;
+            try {
+                const results = await subtitleSearchEngine.search({
+                    code,
+                    normalizedCode: code.toUpperCase(),
+                    fileName: identity?.originalFileName,
+                    duration: identity?.duration,
+                    languagePreferences: currentSettings.preferredLanguages,
+                    force: options.forceProviders,
+                    signal: abort.signal
+                }, currentSettings, {
+                    onProgress: (progress) => {
+                        latest = progress;
+                        if (stillCurrent()) panel.setProgress(progress);
+                    }
+                });
+                if (stillCurrent()) {
+                    panel.setProgress({
+                        ...latest,
+                        results,
+                        done: true
+                    });
+                    if (options.cacheResults) {
+                        const key = buildAutoSearchCacheKey({
+                            code,
+                            duration: identity?.duration,
+                            fileName: identity?.originalFileName
+                        });
+                        const hasFailure = Object.values(latest.providerStates).some((state) => state.status === "error" || state.status === "timeout");
+                        if (key && !hasFailure) autoSearchCache.write(key, results);
+                    }
+                    return results;
+                }
+                return [];
+            } finally {
+                if (activeSearchAbort === abort) activeSearchAbort = null;
+            }
         }
 
-        async function handleAutoSearch(identity) {
+        async function handleAutoSearch() {
             if (!currentSettings.autoSearch) return;
-            const code = identity.code;
-            if (!code) return;
             const generation = ++autoSearchGeneration;
             const epoch = searchEpoch;
             await new Promise((resolve) => window.setTimeout(resolve, 700));
             if (generation !== autoSearchGeneration || epoch !== searchEpoch) return;
-            if (code === lastAutoSearchKey) return;
             if (!currentSettings.autoSearch) return;
             let currentIdentity = controller.getCurrentIdentity();
-            if (!currentIdentity || currentIdentity.code !== code) return;
+            if (!currentIdentity) return;
+            const code = currentManualCode || currentIdentity.code;
+            if (!code) return;
+            if (code === lastAutoSearchKey) return;
             const deadline = Date.now() + 3e3;
             for (; ;) {
                 if (controller.getCurrentSubtitleId()) return;
@@ -3687,10 +4762,26 @@
                 await new Promise((resolve) => window.setTimeout(resolve, 250));
                 if (generation !== autoSearchGeneration || epoch !== searchEpoch) return;
                 currentIdentity = controller.getCurrentIdentity();
-                if (!currentIdentity || currentIdentity.code !== code) return;
+                if (!currentIdentity || (currentManualCode || currentIdentity.code) !== code) return;
+            }
+            const cacheKey = buildAutoSearchCacheKey({
+                code,
+                duration: currentIdentity.duration,
+                fileName: currentIdentity.originalFileName
+            });
+            const cachedResults = autoSearchCache.read(cacheKey);
+            if (cachedResults) {
+                lastAutoSearchKey = code;
+                panel.setProgress({
+                    providerStates: {},
+                    results: cachedResults,
+                    done: true
+                });
+                panel.showToast(cachedResults.length > 0 ? `使用 15 分钟内的自动搜索结果（${cachedResults.length} 条），请在列表中手动选择` : "最近一次自动搜索没有结果；可手动修改番号后搜索", cachedResults.length > 0 ? "success" : "warn");
+                return;
             }
             lastAutoSearchKey = code;
-            const results = await handleSearch(code, currentIdentity);
+            const results = await handleSearch(code, currentIdentity, {cacheResults: true});
             if (identityToken(controller.getCurrentIdentity()) !== identityToken(currentIdentity)) return;
             if (results.length > 0) panel.showToast(`已自动搜索到 ${results.length} 条字幕，请在列表中手动选择`);
         }
@@ -3702,19 +4793,20 @@
             if (token && token === lastRemoteRestoreToken) return;
             const remote = metadataSync.getRemoteForVideo(identity.videoKey, identity.fileId);
             if (!remote.selected) {
-                handleAutoSearch(identity);
+                handleAutoSearch();
                 return;
             }
             lastRemoteRestoreToken = token;
             if (await restoreRemoteSubtitle(remote.selected, identity)) return;
             if (identityToken(controller.getCurrentIdentity()) !== token) return;
             if (controller.getCurrentSubtitleId()) return;
-            handleAutoSearch(identity);
+            handleAutoSearch();
         }
 
-        async function waitForStableIdentity(token, timeoutMs = 3e3) {
+        async function waitForStableIdentity(token, timeoutMs = 3e3, signal) {
             const deadline = Date.now() + timeoutMs;
             for (; ;) {
+                if (signal?.aborted) return null;
                 const current = controller.getCurrentIdentity();
                 if (!current || identityToken(current) !== token) return null;
                 if (current.duration !== void 0 && controller.isMediaMetadataReady()) return current;
@@ -3727,25 +4819,36 @@
             const provider = providerManager.get(meta.providerId);
             const providerEnabled = currentSettings.providers[meta.providerId]?.enabled ?? true;
             if (!provider || !providerEnabled || !meta.sourceResult) return false;
+            if (meta.format === "ass" || meta.format === "ssa") return false;
             const token = identityToken(identity);
             const epoch = searchEpoch;
+            const abort = beginDownload();
             try {
                 panel.showToast(`正在从 ${meta.origin} 恢复缓存字幕…`);
-                const download = await provider.download(meta.sourceResult);
-                if (epoch !== searchEpoch || identityToken(controller.getCurrentIdentity()) !== token) return false;
-                const latestIdentity = await waitForStableIdentity(token);
+                const download = await provider.download(meta.sourceResult, abort.signal);
+                if (abort.signal.aborted || epoch !== searchEpoch || identityToken(controller.getCurrentIdentity()) !== token) return false;
+                const latestIdentity = await waitForStableIdentity(token, 3e3, abort.signal);
                 if (!latestIdentity) return false;
                 if (!allowReplace && controller.getCurrentSubtitleId()) return false;
                 const format = detectFormat(download.fileName);
-                if (format === "unknown") {
+                if (format === "unknown" || format === "ass" || format === "ssa") {
                     logger.warn(`跨播放域名恢复失败：不支持的字幕格式 ${download.fileName}`);
                     return false;
                 }
                 const parsed = parseSubtitle(download.bytes, format);
                 const duplicate = await subtitleRepository.findByChecksum(latestIdentity.videoKey, download.checksum);
                 if (duplicate) {
-                    await subtitleRepository.setSelectedForVideo(latestIdentity.videoKey, duplicate.id);
-                    applySubtitle(duplicate.title, duplicate.id, duplicate.cues, `已从 ${meta.origin} 恢复`);
+                    let current = duplicate;
+                    if (!current.sourceResult && meta.sourceResult) {
+                        current = {
+                            ...current,
+                            sourceResult: meta.sourceResult
+                        };
+                        await subtitleRepository.save(current);
+                    }
+                    current = await ensureCurrentParser(current);
+                    await subtitleRepository.setSelectedForVideo(latestIdentity.videoKey, current.id);
+                    applySubtitle(current.title, current.id, current.cues, `已从 ${meta.origin} 恢复`);
                     refreshCacheList();
                     publishMetadata();
                     return true;
@@ -3754,7 +4857,7 @@
                 const record = {
                     id: existingById && existingById.videoKey !== latestIdentity.videoKey ? uuid() : meta.id,
                     videoKey: latestIdentity.videoKey,
-                    code: meta.code || latestIdentity.code || "",
+                    code: currentManualCode || meta.code || latestIdentity.code || "",
                     providerId: meta.providerId,
                     sourceId: meta.sourceId,
                     title: meta.title,
@@ -3767,8 +4870,7 @@
                     checksum: download.checksum,
                     createdAt: meta.createdAt,
                     lastUsedAt: Date.now(),
-                    parserVersion: 1,
-                    isFavorite: meta.isFavorite,
+                    parserVersion: 2,
                     sourceResult: meta.sourceResult
                 };
                 await subtitleRepository.save(record);
@@ -3778,55 +4880,93 @@
                 applySubtitle(record.title, record.id, parsed.cues, note);
                 refreshCacheList();
                 publishMetadata();
+                enforceCacheLimit();
                 return true;
             } catch (e) {
-                logger.warn("跨播放域名恢复字幕失败", e);
+                if (!abort.signal.aborted) logger.warn("跨播放域名恢复字幕失败", e);
                 return false;
+            } finally {
+                endDownload(abort);
             }
         }
 
         async function handleRestoreRemote(meta) {
             const identity = controller.getCurrentIdentity();
             if (!identity) {
-                alert("未检测到视频");
+                showWarning("未检测到视频");
                 return;
             }
             if (!meta.sourceResult) {
                 panel.showToast("这条字幕来自本地导入，无法在另一播放域名自动恢复", "warn");
                 return;
             }
-            if (!await restoreRemoteSubtitle(meta, identity, true)) panel.showToast("跨播放域名恢复失败，请重试或手动搜索", "warn");
+            if (!await restoreRemoteSubtitle(meta, identity, true) && identityToken(controller.getCurrentIdentity()) === identityToken(identity)) panel.showToast("跨播放域名恢复失败，请重试或手动搜索", "warn");
 		}
 		async function handleSelectResult(result) {
+            const abort = beginDownload();
 			try {
 				const provider = providerManager.get(result.providerId);
 				if (!provider) {
-					alert(`未找到字幕来源：${result.providerId}`);
+                    showWarning(`未找到字幕来源：${result.providerId}`);
+                    return;
+                }
+                if (result.format === "ass" || result.format === "ssa") {
+                    showWarning("暂不支持 ASS/SSA 字幕解析，请选择 SRT/VTT 结果；如需保留文件可点「下载」。");
 					return;
 				}
                 const identity = controller.getCurrentIdentity();
                 if (identity) {
                     const cached = await subtitleRepository.findBySource(identity.videoKey, result.providerId, result.sourceId);
                     if (cached) {
-                        await subtitleRepository.setSelectedForVideo(identity.videoKey, cached.id);
-                        applySubtitle(cached.title, cached.id, cached.cues, "缓存命中，无需重复下载");
+                        let current = cached;
+                        try {
+                            if (!current.sourceResult) {
+                                current = {
+                                    ...current,
+                                    sourceResult: result,
+                                    lastUsedAt: Date.now()
+                                };
+                                await subtitleRepository.save(current);
+                            }
+                            current = await ensureCurrentParser(current);
+                            await subtitleRepository.setSelectedForVideo(identity.videoKey, current.id);
+                        } catch (e) {
+                            logger.warn("更新字幕缓存失败，仍使用已解析内容", e);
+                        }
+                        applySubtitle(current.title, current.id, current.cues, "缓存命中，无需重复下载");
                         refreshCacheList();
                         publishMetadata();
                         return;
                     }
                 }
-				const download = await provider.download(result);
+                logger.info(`开始使用在线字幕：${result.providerId}/${result.title}`);
+                panel.showToast("正在下载并解析字幕…");
+                const download = await provider.download(result, abort.signal);
 				const format = detectFormat(download.fileName);
-				if (format === "unknown") {
-					alert("不支持的字幕格式");
+                if (format === "unknown" || format === "ass" || format === "ssa") {
+                    showWarning("暂不支持该字幕格式，当前仅支持 SRT/VTT。");
 					return;
 				}
 				const parsed = parseSubtitle(download.bytes, format);
 				if (identity) {
                     const duplicate = await subtitleRepository.findByChecksum(identity.videoKey, download.checksum);
                     if (duplicate) {
-                        await subtitleRepository.setSelectedForVideo(identity.videoKey, duplicate.id);
-                        applySubtitle(duplicate.title, duplicate.id, duplicate.cues, "内容相同，已复用缓存");
+                        let current = duplicate;
+                        try {
+                            if (!current.sourceResult) {
+                                current = {
+                                    ...current,
+                                    sourceResult: result,
+                                    lastUsedAt: Date.now()
+                                };
+                                await subtitleRepository.save(current);
+                            }
+                            current = await ensureCurrentParser(current);
+                            await subtitleRepository.setSelectedForVideo(identity.videoKey, current.id);
+                        } catch (e) {
+                            logger.warn("更新字幕缓存失败，仍使用已解析内容", e);
+                        }
+                        applySubtitle(current.title, current.id, current.cues, "内容相同，已复用缓存");
                         refreshCacheList();
                         publishMetadata();
                         return;
@@ -3834,7 +4974,7 @@
 					const record = {
 						id: uuid(),
 						videoKey: identity.videoKey,
-						code: result.code ?? identity.code ?? "",
+                        code: currentManualCode || result.code || identity.code || "",
 						providerId: result.providerId,
 						sourceId: result.sourceId,
 						title: result.title,
@@ -3847,36 +4987,53 @@
 						checksum: download.checksum,
 						createdAt: Date.now(),
 						lastUsedAt: Date.now(),
-						parserVersion: 1,
-                        isFavorite: false,
+                        parserVersion: 2,
                         sourceResult: result
 					};
-					await subtitleRepository.save(record);
-                    const replaced = await replaceCachedByCode(record.code, record.id);
-					await subtitleRepository.setSelectedForVideo(identity.videoKey, record.id);
-                    applySubtitle(result.title, record.id, parsed.cues, replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : void 0);
+                    let replaced = 0;
+                    let cacheFailed = false;
+                    try {
+                        await subtitleRepository.save(record);
+                        replaced = await replaceCachedByCode(record.code, record.id);
+                        await subtitleRepository.setSelectedForVideo(identity.videoKey, record.id);
+                    } catch (e) {
+                        cacheFailed = true;
+                        logger.warn("写入字幕缓存失败，但仍应用字幕", e);
+                    }
+                    applySubtitle(result.title, record.id, parsed.cues, cacheFailed ? "字幕已生效，但缓存写入失败" : replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : void 0);
 					refreshCacheList();
-                    publishMetadata();
+                    if (!cacheFailed) {
+                        publishMetadata();
+                        enforceCacheLimit();
+                    }
 				} else {
 					applySubtitle(result.title, null, parsed.cues);
 					logger.info("已加载字幕但未检测到视频，无法关联缓存");
 				}
 			} catch (e) {
-				alert(isSubtitleError(e) ? e.message : "下载字幕失败");
+                if (abort.signal.aborted) return;
+                showWarning(isSubtitleError(e) ? e.message : "下载字幕失败");
 				logger.error("下载字幕失败", e);
+            } finally {
+                endDownload(abort);
 			}
 		}
 		async function handlePreviewResult(result) {
+            const abort = beginDownload();
 			try {
 				const provider = providerManager.get(result.providerId);
 				if (!provider) {
-					alert(`未找到字幕来源：${result.providerId}`);
+                    showWarning(`未找到字幕来源：${result.providerId}`);
 					return;
 				}
-				const download = await provider.download(result);
+                if (result.format === "ass" || result.format === "ssa") {
+                    showWarning("暂不支持 ASS/SSA 字幕预览，当前仅支持 SRT/VTT。");
+                    return;
+                }
+                const download = await provider.download(result, abort.signal);
 				const format = detectFormat(download.fileName);
-				if (format === "unknown") {
-					alert("不支持的字幕格式");
+                if (format === "unknown" || format === "ass" || format === "ssa") {
+                    showWarning("暂不支持该字幕格式，当前仅支持 SRT/VTT。");
 					return;
 				}
                 const parsed = parseSubtitle(download.bytes, format);
@@ -3884,18 +5041,22 @@
                 if (!content.trim()) content = decodeRawSubtitle(download.bytes, parsed.encoding);
                 panel.showPreview(result.title, limitPreviewText(content.trim() ? content : "（无字幕内容）"));
 			} catch (e) {
-				alert(isSubtitleError(e) ? e.message : "预览字幕失败");
+                if (abort.signal.aborted) return;
+                showWarning(isSubtitleError(e) ? e.message : "预览字幕失败");
 				logger.error("预览字幕失败", e);
+            } finally {
+                endDownload(abort);
 			}
 		}
 		async function handleDownloadResult(result) {
+            const abort = beginDownload();
 			try {
 				const provider = providerManager.get(result.providerId);
 				if (!provider) {
-					alert(`未找到字幕来源：${result.providerId}`);
+                    showWarning(`未找到字幕来源：${result.providerId}`);
 					return;
 				}
-				const download = await provider.download(result);
+                const download = await provider.download(result, abort.signal);
 				const blob = new Blob([download.bytes], { type: "text/plain;charset=utf-8" });
 				const url = URL.createObjectURL(blob);
 				const a = document.createElement("a");
@@ -3907,8 +5068,11 @@
 				setTimeout(() => URL.revokeObjectURL(url), 1e3);
 				logger.info(`已下载字幕：${download.fileName}`);
 			} catch (e) {
-				alert(isSubtitleError(e) ? e.message : "下载字幕失败");
+                if (abort.signal.aborted) return;
+                showWarning(isSubtitleError(e) ? e.message : "下载字幕失败");
 				logger.error("下载字幕失败", e);
+            } finally {
+                endDownload(abort);
 			}
 		}
 		async function handleStyleChange(patch) {
@@ -3934,26 +5098,38 @@
             panel.setSettings(currentSettings, false);
             if (enabled) {
                 lastAutoSearchKey = "";
-                const identity = controller.getCurrentIdentity();
-                if (identity) handleAutoSearch(identity);
+                handleAutoSearch();
             }
+        }
+
+        async function handleShortcutChange(enabled) {
+            currentSettings = await settingsService.update({
+                shortcuts: {
+                    ...currentSettings.shortcuts,
+                    enabled
+                }
+            });
+            panel.setSettings(currentSettings, false);
 		}
 		async function handleSelectCachedSubtitle(record) {
 			try {
+                const current = await ensureCurrentParser(record);
 				const identity = controller.getCurrentIdentity();
-				if (identity) {
-					await subtitleRepository.setSelectedForVideo(identity.videoKey, record.id);
+                if (identity) try {
+                    await subtitleRepository.setSelectedForVideo(identity.videoKey, current.id);
 					await subtitleRepository.save({
-						...record,
-                        videoKey: record.videoKey === identity.videoKey ? record.videoKey : identity.videoKey,
+                        ...current,
+                        videoKey: current.videoKey === identity.videoKey ? current.videoKey : identity.videoKey,
 						lastUsedAt: Date.now()
 					});
+                } catch (e) {
+                    logger.warn("更新缓存选中状态失败，仍应用字幕", e);
 				}
-				applySubtitle(record.title, record.id, record.cues);
+                applySubtitle(current.title, current.id, current.cues);
 				refreshCacheList();
                 publishMetadata();
 			} catch (e) {
-				alert(isSubtitleError(e) ? e.message : "加载缓存字幕失败");
+                showWarning(isSubtitleError(e) ? e.message : "加载缓存字幕失败");
 				logger.error("加载缓存字幕失败", e);
 			}
 		}
@@ -3982,7 +5158,7 @@
                 panel.showToast(result.removed > 0 ? `去重完成：合并 ${result.groups} 组，删除 ${result.removed} 条重复字幕` : "没有需要去重的字幕", result.removed > 0 ? "success" : "warn");
                 logger.info(`缓存去重完成：删除 ${result.removed} 条`);
             } catch (e) {
-                alert(isSubtitleError(e) ? e.message : "缓存去重失败");
+                showWarning(isSubtitleError(e) ? e.message : "缓存去重失败");
                 logger.error("缓存去重失败", e);
             }
         }
@@ -4006,16 +5182,111 @@
                 panel.showToast(`已导出 ${records.length} 条字幕`);
                 logger.info(`已导出字幕压缩包（${records.length} 条）`);
             } catch (e) {
-                alert("导出字幕失败");
+                showWarning("导出字幕失败");
                 logger.error("导出字幕失败", e);
             }
         }
+
+        function handlePositioningChange(enabled) {
+            controller.setPositioningMode(enabled);
+            panel.setPositioning(enabled);
+            if (enabled) panel.showToast("拖动字幕到目标位置；按 Esc 或再次点击「完成定位」退出");
+        }
+
+        async function handleCheckProviders() {
+            const providers = providerManager.getAll().filter((provider) => provider.id !== "local");
+            const checks = await Promise.allSettled(providers.map(async (provider) => {
+                if (!provider.healthCheck) return {
+                    name: provider.name,
+                    ok: true,
+                    message: "未提供检测"
+                };
+                const result = await provider.healthCheck();
+                return {
+                    name: provider.name,
+                    ...result
+                };
+            }));
+            const failed = [];
+            const passed = [];
+            checks.forEach((check, index) => {
+                const fallbackName = providers[index]?.name ?? "未知来源";
+                if (check.status === "fulfilled" && check.value.ok) passed.push(check.value.name);
+                else {
+                    const reason = check.status === "fulfilled" ? check.value.message ?? "不可用" : check.reason instanceof Error ? check.reason.message : "检测失败";
+                    failed.push(`${fallbackName}：${reason}`);
+                }
+            });
+            panel.showToast(failed.length === 0 ? `来源检测通过：${passed.join("、")}` : `可用：${passed.join("、") || "无"}；失败：${failed.join("；")}`, failed.length === 0 ? "success" : "warn");
+        }
+
+        async function handleBackfillSources() {
+            const identity = controller.getCurrentIdentity();
+            if (!identity) {
+                panel.showToast("未检测到视频", "warn");
+                return;
+            }
+            const code = currentManualCode || identity.code;
+            if (!code) {
+                panel.showToast("当前视频没有可搜索的番号", "warn");
+                return;
+            }
+            const missing = (await subtitleRepository.getByVideoKey(identity.videoKey)).filter((record) => record.providerId !== "local" && record.sourceId && !record.sourceResult);
+            if (missing.length === 0) {
+                panel.showToast("当前视频没有需要补齐来源信息的缓存", "warn");
+                return;
+            }
+            const results = await handleSearch(code, identity, {forceProviders: true});
+            const bySource = new Map(results.map((result) => [`${result.providerId}:${result.sourceId}`, result]));
+            let filled = 0;
+            for (const record of missing) {
+                const result = bySource.get(`${record.providerId}:${record.sourceId}`);
+                if (!result) continue;
+                await subtitleRepository.save({
+                    ...record,
+                    sourceResult: result,
+                    lastUsedAt: Date.now()
+                });
+                filled++;
+            }
+            await refreshCacheList();
+            if (filled > 0) publishMetadata();
+            panel.showToast(filled > 0 ? `已补齐 ${filled} 条字幕的来源信息，可在其他播放域名恢复` : "本次搜索结果中没有匹配的来源条目", filled > 0 ? "success" : "warn");
+        }
+
+        async function handleClearRemoteSync() {
+            try {
+                const origins = metadataSync.clearRemoteOrigins();
+                await refreshCacheList();
+                panel.showToast(origins.length > 0 ? `已清理 ${origins.length} 个其他播放域名的同步索引` : "没有可清理的远程同步索引", origins.length > 0 ? "success" : "warn");
+            } catch (e) {
+                logger.error("清理远程同步索引失败", e);
+                panel.showToast("清理远程同步索引失败", "warn");
+            }
+        }
+
+        async function handleRefreshSync() {
+            try {
+                await publishMetadataNow();
+                await refreshCacheList();
+                panel.showToast("已刷新跨播放域名缓存索引");
+            } catch (e) {
+                logger.error("刷新同步索引失败", e);
+                panel.showToast("刷新同步索引失败", "warn");
+            }
+        }
 		async function handleClearCache() {
-			await subtitleRepository.clearAll();
-			controller.clearSubtitle();
-			panel.setCurrentSubtitle(null);
-			refreshCacheList();
-            publishMetadata();
+            try {
+                await subtitleRepository.clearAll();
+                controller.clearSubtitle();
+                panel.setCurrentSubtitle(null);
+                refreshCacheList();
+                publishMetadata();
+                panel.showToast("已清空所有字幕缓存");
+            } catch (e) {
+                logger.error("清空缓存失败", e);
+                panel.showToast("清空缓存失败", "warn");
+            }
 		}
 		async function handleDeleteSubtitle(id) {
 			await subtitleRepository.delete(id);
@@ -4026,6 +5297,56 @@
 			refreshCacheList();
             publishMetadata();
 		}
+
+        function formatByteSize(bytes) {
+            if (bytes < 1024) return `${bytes}B`;
+            if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)}KB`;
+            return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+        }
+
+        function protectedSubtitleIds() {
+            const current = controller.getCurrentSubtitleId();
+            return current ? [current] : [];
+        }
+
+        async function handleCleanupCache() {
+            try {
+                const result = await subtitleRepository.cleanup({
+                    maxBytes: 0,
+                    olderThanDays: currentSettings.cache.cleanupAfterDays,
+                    protectIds: protectedSubtitleIds()
+                });
+                lastCacheCheckAt = Date.now();
+                if (result.removed > 0) {
+                    await refreshCacheList();
+                    publishMetadata();
+                    panel.showToast(`清理完成：删除 ${result.removed} 条，释放 ${formatByteSize(result.freedBytes)}`);
+                } else panel.showToast("没有可清理的未使用缓存", "warn");
+            } catch (e) {
+                logger.error("清理缓存失败", e);
+                panel.showToast("清理缓存失败", "warn");
+            }
+        }
+
+        async function enforceCacheLimit(force = false) {
+            const now = Date.now();
+            if (!force && now - lastCacheCheckAt < 6e4) return;
+            lastCacheCheckAt = now;
+            try {
+                const result = await subtitleRepository.cleanup({
+                    maxBytes: currentSettings.cache.maxBytes,
+                    olderThanDays: 0,
+                    protectIds: protectedSubtitleIds()
+                });
+                if (result.removed > 0) {
+                    await refreshCacheList();
+                    publishMetadata();
+                    panel.showToast(`缓存超出上限，已自动清理 ${result.removed} 条旧字幕，释放 ${formatByteSize(result.freedBytes)}`, "warn");
+                }
+            } catch (e) {
+                logger.warn("自动清理缓存失败", e);
+            }
+        }
 		async function refreshCacheList() {
             const all = await subtitleRepository.getAll();
             const bytes = all.reduce((sum, record) => sum + record.rawBlob.size, 0);
@@ -4033,18 +5354,28 @@
                 count: all.length,
                 bytes
             });
-            panel.setRemoteSummary(metadataSync.getRemoteSummary());
 			const identity = controller.getCurrentIdentity();
             if (!identity) {
+                localSubtitleIds = new Set();
                 panel.setCachedSubtitles([]);
-                panel.setRemoteSubtitles([]);
+                refreshRemoteCache();
                 return;
             }
             const local = all.filter((record) => record.videoKey === identity.videoKey || identity.fileId !== void 0 && fileIdFromVideoKey(record.videoKey) === identity.fileId);
             panel.setCachedSubtitles(local);
-            const localIds = new Set(local.map((record) => record.id));
+            localSubtitleIds = new Set(local.map((record) => record.id));
+            refreshRemoteCache();
+        }
+
+        function refreshRemoteCache() {
+            panel.setRemoteSummary(metadataSync.getRemoteSummary());
+            const identity = controller.getCurrentIdentity();
+            if (!identity) {
+                panel.setRemoteSubtitles([]);
+                return;
+            }
             const remote = metadataSync.getRemoteForVideo(identity.videoKey, identity.fileId);
-            panel.setRemoteSubtitles(remote.subtitles.filter((item) => !localIds.has(item.id)));
+            panel.setRemoteSubtitles(remote.subtitles.filter((item) => !localSubtitleIds.has(item.id)));
         }
     }
 

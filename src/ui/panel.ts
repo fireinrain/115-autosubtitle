@@ -5,6 +5,8 @@ import type { GlobalSettings, SubtitleStyleSettings } from "../settings/settings
 import {FONT_PRESETS, findFontPreset, normalizeFontFamily} from "../settings/font-presets";
 import type { SubtitleRecord } from "../storage/database";
 import type {RemoteCacheSummary, RemoteSubtitleMeta} from "../storage/metadata-sync";
+import {throttle} from "../utils/debounce";
+import {logger} from "../utils/logger";
 import {
   decodeRawSubtitle,
   formatCuesWithTimestamps,
@@ -23,10 +25,17 @@ export interface PanelCallbacks {
   onOffsetChange: (offsetMs: number) => void;
   onToggleSubtitle: (enabled: boolean) => void;
   onAutoSearchChange: (enabled: boolean) => void;
+  onShortcutChange: (enabled: boolean) => void;
   onClearCache: () => void;
   onDeleteSubtitle: (id: string) => void;
+  onCleanupCache: () => void;
   onDeduplicateCache: () => void;
   onExportAll: () => void;
+  onRefreshSync: () => void;
+  onClearRemoteSync: () => void;
+  onPositioningChange: (enabled: boolean) => void;
+  onCheckProviders: () => void;
+  onBackfillSources: () => void;
 }
 
 type PanelTab = "subs" | "style" | "sync" | "cache";
@@ -43,7 +52,7 @@ const PANEL_CSS = `
   * { box-sizing: border-box; }
   .panel {
     position: fixed; display: none; flex-direction: column;
-    width: 400px; max-height: min(62vh, 620px);
+    width: min(400px, calc(100vw - 16px)); max-height: min(62vh, 620px);
     background: #1e1e2e; color: #cdd6f4;
     border: 1px solid #45475a; border-radius: 10px;
     box-shadow: 0 12px 40px rgba(0,0,0,.55);
@@ -75,6 +84,9 @@ const PANEL_CSS = `
   .field-label { min-width: 62px; font-size: 12px; color: #a6adc8; }
   .input { flex: 1; min-width: 0; padding: 6px 10px; background: #313244; border: 1px solid #45475a; border-radius: 6px; color: #cdd6f4; font-size: 13px; }
   .input:focus { outline: none; border-color: #89b4fa; }
+  .input:focus-visible, .btn:focus-visible, .tab:focus-visible, .pill:focus-visible, .close:focus-visible {
+    outline: 2px solid #89b4fa; outline-offset: 2px;
+  }
   select.input { cursor: pointer; }
   .btn { padding: 6px 12px; background: #89b4fa; color: #1e1e2e; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; white-space: nowrap; }
   .btn:hover { background: #74c7ec; }
@@ -107,11 +119,21 @@ const PANEL_CSS = `
   .modal-header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: #181825; border-bottom: 1px solid #313244; }
   .modal-title { flex: 1; font-size: 13px; font-weight: 600; word-break: break-all; }
   .modal-body { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  .confirm-modal { width: 420px; }
+  .confirm-text { padding: 18px 16px 8px; color: #cdd6f4; font-size: 13px; line-height: 1.7; white-space: pre-wrap; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px 16px; }
   .preview-line { padding: 3px 0; border-bottom: 1px solid #313244; font-size: 12px; line-height: 1.6; color: #cdd6f4; }
   .preview-line:last-child { border-bottom: none; }
   .preview-line:empty { border-bottom: none; padding: 0; height: 8px; }
   .preview-time { color: #89b4fa; font-variant-numeric: tabular-nums; }
   .preview-text { color: #cdd6f4; }
+  @media (max-width: 520px) {
+    .result-head { flex-wrap: wrap; }
+    .result-title-wrap { max-width: 100%; flex: 1 1 100%; }
+    .result-actions { margin-left: 0; flex-wrap: wrap; }
+    .modal { width: 96vw; max-width: 96vw; max-height: 86vh; }
+    .modal-overlay { padding: 8px; }
+  }
 `;
 
 function div(className: string, text?: string): HTMLDivElement {
@@ -157,9 +179,16 @@ export class SubtitlePanel {
   private codeDraft: string | null = null;
   private toastEl: HTMLElement | null = null;
   private toastTimer: number | null = null;
+  private confirmEl: HTMLElement | null = null;
+  private confirmResolve: ((value: boolean) => void) | null = null;
+  private lastFocusedElement: HTMLElement | null = null;
+  private renderScheduled = false;
+  private positioning = false;
 
   private playerRoot: HTMLElement | null = null;
   private playerBarObserver: MutationObserver | null = null;
+  private scheduleNativeToggle = throttle(() => this.ensureNativeToggle(), 100);
+  private nativeToggleWarned = false;
   private nativeToggle: { container: HTMLElement; anchor: HTMLElement } | null = null;
   private subtitleVisible = true;
   /** 控制栏自动隐藏时锚点 rect 会退化为 0，用最近一次有效位置兜底。 */
@@ -190,33 +219,33 @@ export class SubtitlePanel {
   setIdentity(identity: VideoIdentity | null): void {
     if (this.identity?.videoKey !== identity?.videoKey) this.codeDraft = null;
     this.identity = identity;
-    this.renderBody();
+    this.requestRender(["subs"]);
   }
 
   setProgress(progress: SearchProgress | null): void {
     this.progress = progress;
-    this.renderBody();
+    this.requestRender(["subs"]);
   }
 
   setCurrentSubtitle(title: string | null, subtitleId: string | null = null): void {
     this.currentSubtitle = title;
     this.currentSubtitleId = subtitleId;
-    this.renderBody();
+    this.requestRender(["subs"]);
   }
 
   setCachedSubtitles(subtitles: SubtitleRecord[]): void {
     this.cachedSubtitles = subtitles;
-    this.renderBody();
+    this.requestRender(["subs", "cache"]);
   }
 
   setRemoteSubtitles(subtitles: RemoteSubtitleMeta[]): void {
     this.remoteSubtitles = subtitles;
-    this.renderBody();
+    this.requestRender(["subs", "cache"]);
   }
 
   setRemoteSummary(summary: RemoteCacheSummary): void {
     this.remoteSummary = summary;
-    if (this.visible && this.activeTab === "cache") this.renderBody();
+    this.requestRender(["cache"]);
   }
 
   setCacheSummary(summary: { count: number; bytes: number }): void {
@@ -224,7 +253,7 @@ export class SubtitlePanel {
         this.cacheSummary.count !== summary.count || this.cacheSummary.bytes !== summary.bytes;
     this.cacheSummary = summary;
     // 缓存数量和列表通常一起更新；这里只在摘要真的变化时重绘，避免重复重建 DOM。
-    if (changed && this.visible && this.activeTab === "cache") this.renderBody();
+    if (changed) this.requestRender(["cache"]);
   }
 
   /**
@@ -234,7 +263,7 @@ export class SubtitlePanel {
    */
   setSettings(settings: GlobalSettings, updateView = true): void {
     this.settings = settings;
-    if (updateView) this.renderBody();
+    if (updateView) this.requestRender(["subs", "style", "sync"]);
   }
 
   show(tab: PanelTab = this.activeTab): void {
@@ -245,6 +274,10 @@ export class SubtitlePanel {
   }
 
   hide(): void {
+    if (this.positioning) {
+      this.positioning = false;
+      this.callbacks.onPositioningChange(false);
+    }
     this.visible = false;
     this.panelEl?.classList.remove("open");
   }
@@ -258,15 +291,22 @@ export class SubtitlePanel {
     this.modalEl = null;
     if (!this.root) return;
 
+    this.lastFocusedElement =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const overlay = div("modal-overlay");
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) this.closePreview();
     });
 
     const modal = div("modal");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-label", `字幕预览：${title}`);
     const header = div("modal-header");
     header.appendChild(div("modal-title", title));
-    header.appendChild(btn("close", "×", () => this.closePreview()));
+    const closeButton = btn("close", "×", () => this.closePreview());
+    closeButton.setAttribute("aria-label", "关闭字幕预览");
+    header.appendChild(closeButton);
 
     const body = div("modal-body");
     const lines = content.split("\n");
@@ -281,11 +321,63 @@ export class SubtitlePanel {
     overlay.appendChild(modal);
     this.root.appendChild(overlay);
     this.modalEl = overlay;
+    closeButton.focus();
+  }
+
+  /**
+   * 非阻塞确认弹层。替代 window.confirm()，避免阻塞播放器线程与键盘事件。
+   * 返回 Promise，用户确认/取消/按 Escape/点击遮罩都会结束。
+   */
+  showConfirm(message: string): Promise<boolean> {
+    if (!this.root) return Promise.resolve(false);
+    if (this.confirmEl) this.closeConfirm(false);
+
+    this.lastFocusedElement =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    const overlay = div("modal-overlay");
+    const modal = div("modal confirm-modal");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("aria-label", "确认操作");
+    const text = div("confirm-text", message);
+    const actions = div("modal-actions");
+    const cancel = btn("btn btn-ghost", "取消", () => this.closeConfirm(false));
+    const confirm = btn("btn btn-danger", "确定", () => this.closeConfirm(true));
+    cancel.type = "button";
+    confirm.type = "button";
+    actions.append(cancel, confirm);
+    modal.append(text, actions);
+    overlay.appendChild(modal);
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) this.closeConfirm(false);
+    });
+    this.root.appendChild(overlay);
+    this.confirmEl = overlay;
+    confirm.focus();
+
+    return new Promise<boolean>((resolve) => {
+      this.confirmResolve = resolve;
+    });
+  }
+
+  private closeConfirm(value: boolean): void {
+    if (!this.confirmEl) return;
+    this.confirmEl.remove();
+    this.confirmEl = null;
+    const resolve = this.confirmResolve;
+    this.confirmResolve = null;
+    resolve?.(value);
+    this.lastFocusedElement?.focus();
+    this.lastFocusedElement = null;
   }
 
   private closePreview(): void {
+    const hadFocus = this.lastFocusedElement;
     this.modalEl?.remove();
     this.modalEl = null;
+    hadFocus?.focus();
+    this.lastFocusedElement = null;
   }
 
   /**
@@ -302,20 +394,28 @@ export class SubtitlePanel {
    */
   mountPlayerControls(playerRoot: HTMLElement): void {
     if (this.playerRoot === playerRoot) {
-      this.ensureNativeToggle();
+      this.scheduleNativeToggle();
       return;
     }
     this.teardownPlayerControls();
     this.playerRoot = playerRoot;
-    this.ensureNativeToggle();
-    this.playerBarObserver = new MutationObserver(() => this.ensureNativeToggle());
+    this.nativeToggleWarned = false;
+    this.scheduleNativeToggle();
+    this.playerBarObserver = new MutationObserver(() => this.scheduleNativeToggle());
     this.playerBarObserver.observe(playerRoot, { childList: true, subtree: true });
   }
 
   setSubtitleVisible(visible: boolean): void {
     this.subtitleVisible = visible;
     this.updateStatusPill();
-    if (this.visible && this.activeTab === "subs") this.renderBody();
+    this.requestRender(["subs"]);
+  }
+
+  /** 同步「调整位置」按钮的视觉状态（定位模式由 PlayerController 执行）。 */
+  setPositioning(active: boolean): void {
+    if (this.positioning === active) return;
+    this.positioning = active;
+    this.requestRender(["style"]);
   }
 
   private findNativeSubtitleControl(
@@ -333,14 +433,23 @@ export class SubtitlePanel {
 
     // 新播放器：控制栏里的 <button>字幕</button>，外层是 <div class="relative">。
     // 按钮类名是构建时生成的 utility class，不能作为长期选择器，只按文本定位。
-    const buttons = root.querySelectorAll<HTMLButtonElement>("button");
+    const buttons = [...root.querySelectorAll<HTMLButtonElement>("button")]
+        .filter((button) => !button.closest('[data-userscript="subtitle-toggle"]'))
+        .filter((button) => button.getBoundingClientRect().width > 0);
     for (const button of buttons) {
-      if (button.closest('[data-userscript="subtitle-toggle"]')) continue;
-      if (button.textContent?.trim() !== "字幕") continue;
+      if (button.textContent?.trim() === "字幕") {
+        const container = button.parentElement;
+        if (container) return {container, button, mode: "modern"};
+      }
+    }
+
+    // 结构 fallback：115 改版后按钮文本可能带空格/图标，优先看无障碍标签。
+    // 只接受包含「字幕/subtitle」且可见的控件，避免误绑到其他功能。
+    for (const button of buttons) {
+      const label = `${button.getAttribute("aria-label") ?? ""} ${button.title ?? ""}`.toLowerCase();
+      if (!label.includes("字幕") && !label.includes("subtitle")) continue;
       const container = button.parentElement;
-      if (!container) continue;
-      if (button.getBoundingClientRect().width <= 0) continue;
-      return {container, button, mode: "modern"};
+      if (container) return {container, button, mode: "modern"};
     }
 
     return null;
@@ -349,7 +458,20 @@ export class SubtitlePanel {
   private ensureNativeToggle(): void {
     if (!this.playerRoot) return;
     const native = this.findNativeSubtitleControl(this.playerRoot);
-    if (!native) return;
+    if (!native) {
+      if (!this.nativeToggleWarned) {
+        this.nativeToggleWarned = true;
+        const buttons = [...this.playerRoot.querySelectorAll<HTMLElement>("button, a")]
+            .slice(0, 12)
+            .map((el) => `${el.tagName.toLowerCase()}:${(el.textContent ?? "").trim().slice(0, 16)}`);
+        logger.warn("未找到 115 原生字幕按钮，CC 入口暂不可用", {
+          buttons,
+          root: this.playerRoot.className,
+        });
+      }
+      return;
+    }
+    this.nativeToggleWarned = false;
 
     if (
         this.nativeToggle &&
@@ -426,17 +548,87 @@ export class SubtitlePanel {
     const path = event.composedPath();
     if (this.container && path.includes(this.container)) return;
     if (this.nativeToggle && path.includes(this.nativeToggle.container)) return;
+    // 拖动定位时字幕 overlay 在面板外部；点击/拖动它不能被当成“点击面板外”而退出定位。
+    const inSubtitleOverlay = path.some(
+        (node) => node instanceof HTMLElement && node.classList.contains("userscript-subtitle-root"),
+    );
+    if (inSubtitleOverlay) return;
+    if (this.positioning) {
+      this.setPositioning(false);
+      this.callbacks.onPositioningChange(false);
+    }
     this.hide();
   };
 
   private handleDocumentKeyDown = (event: KeyboardEvent): void => {
+    if (this.confirmEl) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.closeConfirm(false);
+      }
+      return;
+    }
+    if (this.handleShortcut(event)) return;
     if (event.key !== "Escape") return;
     if (this.modalEl) {
       this.closePreview();
       return;
     }
+    if (this.positioning) {
+      this.setPositioning(false);
+      this.callbacks.onPositioningChange(false);
+      return;
+    }
     if (this.visible) this.hide();
   };
+
+  /**
+   * Alt 组合键，避免与 115 原生快捷键冲突。
+   * 输入框、文本域、下拉框和 contenteditable 中不生效。
+   */
+  private handleShortcut(event: KeyboardEvent): boolean {
+    if (!this.settings?.shortcuts.enabled) return false;
+    if (this.modalEl || this.confirmEl) return false;
+    if (!event.altKey || event.ctrlKey || event.metaKey) return false;
+    if (this.isEditableTarget(event.target)) return false;
+
+    const sync = this.settings.sync;
+    switch (event.key) {
+      case ",": {
+        const next = sync.offsetMs - sync.stepMs;
+        this.callbacks.onOffsetChange(next);
+        this.showToast(`字幕偏移 ${formatOffset(next)}`);
+        event.preventDefault();
+        return true;
+      }
+      case ".": {
+        const next = sync.offsetMs + sync.stepMs;
+        this.callbacks.onOffsetChange(next);
+        this.showToast(`字幕偏移 ${formatOffset(next)}`);
+        event.preventDefault();
+        return true;
+      }
+      case "0":
+        this.callbacks.onOffsetChange(0);
+        this.showToast("字幕偏移已重置");
+        event.preventDefault();
+        return true;
+      case "c":
+      case "C":
+        this.callbacks.onToggleSubtitle(!this.subtitleVisible);
+        event.preventDefault();
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  private isEditableTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    const tag = target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+    return target.isContentEditable || target.closest('[contenteditable="true"]') !== null;
+  }
 
   private handleViewportChange = (): void => {
     if (this.visible) this.positionPanel();
@@ -450,6 +642,8 @@ export class SubtitlePanel {
     this.root.appendChild(style);
 
     const panel = div("panel");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", "115 字幕助手");
 
     const header = div("header");
     header.appendChild(div("title", "115 字幕助手"));
@@ -461,23 +655,36 @@ export class SubtitlePanel {
       this.subtitleVisible = !this.subtitleVisible;
       this.updateStatusPill();
       this.callbacks.onToggleSubtitle(this.subtitleVisible);
-      if (this.visible && this.activeTab === "subs") this.renderBody();
+      this.requestRender(["subs"]);
     });
     header.appendChild(pill);
     this.statusPill = pill;
 
-    header.appendChild(btn("close", "×", () => this.hide()));
+    const closeButton = btn("close", "×", () => this.hide());
+    closeButton.setAttribute("aria-label", "关闭字幕助手面板");
+    header.appendChild(closeButton);
     panel.appendChild(header);
 
     const tabs = div("tabs");
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "字幕助手面板");
+    tabs.addEventListener("keydown", this.handleTabKeyDown);
     for (const tab of TABS) {
       const el = btn("tab", tab.label, () => this.setActiveTab(tab.id));
+      el.id = `userscript-tab-${tab.id}`;
+      el.setAttribute("role", "tab");
+      el.setAttribute("aria-controls", "userscript-tabpanel");
+      el.setAttribute("aria-selected", "false");
+      el.tabIndex = -1;
       tabs.appendChild(el);
       this.tabEls.set(tab.id, el);
     }
     panel.appendChild(tabs);
 
     const body = div("body");
+    body.id = "userscript-tabpanel";
+    body.setAttribute("role", "tabpanel");
+    body.tabIndex = 0;
     panel.appendChild(body);
 
     this.root.appendChild(panel);
@@ -491,10 +698,28 @@ export class SubtitlePanel {
   private setActiveTab(tab: PanelTab): void {
     this.activeTab = tab;
     for (const [id, el] of this.tabEls) {
-      el.classList.toggle("active", id === tab);
+      const active = id === tab;
+      el.classList.toggle("active", active);
+      el.setAttribute("aria-selected", String(active));
+      el.tabIndex = active ? 0 : -1;
     }
-    this.renderBody();
+    this.bodyEl?.setAttribute("aria-labelledby", `userscript-tab-${tab}`);
+    this.scheduleRender();
   }
+
+  private handleTabKeyDown = (event: KeyboardEvent): void => {
+    const currentIndex = TABS.findIndex((item) => item.id === this.activeTab);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + TABS.length) % TABS.length;
+    else if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % TABS.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = TABS.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const next = TABS[nextIndex];
+    this.setActiveTab(next.id);
+    this.tabEls.get(next.id)?.focus();
+  };
 
   private updateStatusPill(): void {
     if (!this.statusPill) return;
@@ -503,6 +728,24 @@ export class SubtitlePanel {
     this.statusPill.classList.toggle("off", !this.subtitleVisible);
     this.statusPill.setAttribute("aria-pressed", String(this.subtitleVisible));
     this.statusPill.title = this.subtitleVisible ? "点击隐藏字幕" : "点击显示字幕";
+  }
+
+  private requestRender(tabs?: PanelTab[]): void {
+    if (!this.visible) return;
+    if (tabs && !tabs.includes(this.activeTab)) return;
+    this.scheduleRender();
+  }
+
+  /** 合并同一帧内的多次状态更新，避免每次搜索结果/缓存刷新都整块重建 DOM。 */
+  private scheduleRender(): void {
+    if (!this.bodyEl || this.renderScheduled) return;
+    this.renderScheduled = true;
+    const run = () => {
+      this.renderScheduled = false;
+      this.renderBody();
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+    else queueMicrotask(run);
   }
 
   private renderBody(): void {
@@ -562,6 +805,7 @@ export class SubtitlePanel {
     codeInput.type = "text";
     codeInput.className = "input";
     codeInput.placeholder = "输入番号后搜索";
+    codeInput.setAttribute("aria-label", "番号");
     codeInput.value = this.codeDraft ?? this.identity?.code ?? "";
     codeInput.addEventListener("input", () => {
       this.codeDraft = codeInput.value;
@@ -589,6 +833,7 @@ export class SubtitlePanel {
       this.callbacks.onAutoSearchChange(next);
     });
     autoBtn.title = "先恢复该视频的缓存；没有缓存时才自动搜索，但不会自动使用搜索结果";
+    autoBtn.setAttribute("aria-pressed", String(autoOn));
     const autoHint = div("value", "仅搜索，不自动使用");
     autoHint.style.minWidth = "0";
     autoHint.style.flex = "1";
@@ -688,6 +933,7 @@ export class SubtitlePanel {
         this.createSubtitleRow({
           title: result.title,
           meta,
+          reasons: result.matchReasons,
           actions: [
             { label: "使用", primary: true, onClick: () => this.callbacks.onSelectResult(result) },
             { label: "查看", onClick: () => this.callbacks.onPreviewResult(result) },
@@ -822,6 +1068,30 @@ export class SubtitlePanel {
     toggleSection.appendChild(shadowRow);
     pane.appendChild(toggleSection);
 
+    const positionSection = div("section");
+    const positionRow = div("row");
+    const positionBtn = btn(
+        "btn btn-ghost btn-sm",
+        this.positioning ? "完成定位" : "调整位置",
+        () => {
+          const next = !this.positioning;
+          this.setPositioning(next);
+          this.callbacks.onPositioningChange(next);
+        },
+    );
+    positionBtn.setAttribute("aria-pressed", String(this.positioning));
+    positionRow.appendChild(positionBtn);
+    const positionHint = div("value", "拖动字幕到目标位置");
+    positionHint.style.minWidth = "0";
+    positionHint.style.flex = "1";
+    positionHint.style.textAlign = "left";
+    positionRow.appendChild(positionHint);
+    positionSection.appendChild(positionRow);
+    positionSection.appendChild(
+        div("info", "定位模式会临时让字幕接收指针事件；按 Esc 或再次点击「完成定位」退出。"),
+    );
+    pane.appendChild(positionSection);
+
     return pane;
   }
 
@@ -843,6 +1113,7 @@ export class SubtitlePanel {
     slider.step = "100";
     slider.value = String(offset);
     slider.className = "slider";
+    slider.setAttribute("aria-label", "字幕时间偏移");
     const value = div("value", formatOffset(offset));
     slider.addEventListener("input", () => {
       value.textContent = formatOffset(Number(slider.value));
@@ -863,6 +1134,43 @@ export class SubtitlePanel {
     section.appendChild(stepRow);
 
     pane.appendChild(section);
+
+    const providerSection = div("section");
+    providerSection.appendChild(div("section-title", "字幕来源"));
+    const checkRow = div("row");
+    checkRow.appendChild(
+        btn("btn btn-ghost btn-sm", "检测来源", () => this.callbacks.onCheckProviders()),
+    );
+    const checkHint = div("value", "检查迅雷字幕 / SubtitleCat 是否可访问");
+    checkHint.style.minWidth = "0";
+    checkHint.style.flex = "1";
+    checkHint.style.textAlign = "left";
+    checkRow.appendChild(checkHint);
+    providerSection.appendChild(checkRow);
+    pane.appendChild(providerSection);
+
+    const shortcutSection = div("section");
+    shortcutSection.appendChild(div("section-title", "快捷键"));
+    const shortcutRow = div("row");
+    shortcutRow.appendChild(div("field-label", "字幕快捷键"));
+    const shortcutEnabled = this.settings?.shortcuts.enabled ?? true;
+    const shortcutToggle = btn(
+        "btn btn-ghost btn-sm",
+        shortcutEnabled ? "已开启" : "已关闭",
+        () => {
+          const next = !(this.settings?.shortcuts.enabled ?? true);
+          shortcutToggle.textContent = next ? "已开启" : "已关闭";
+          this.callbacks.onShortcutChange(next);
+        },
+    );
+    shortcutToggle.setAttribute("aria-pressed", String(shortcutEnabled));
+    shortcutRow.appendChild(shortcutToggle);
+    shortcutSection.appendChild(shortcutRow);
+    shortcutSection.appendChild(
+        div("info", "Alt+, / Alt+. 调整偏移，Alt+0 重置，Alt+C 开关字幕；输入框中不生效。"),
+    );
+    pane.appendChild(shortcutSection);
+
     return pane;
   }
 
@@ -877,11 +1185,13 @@ export class SubtitlePanel {
         this.remoteSummary.count > 0
             ? `；其他播放域名 ${this.remoteSummary.count} 条 / ${formatSize(this.remoteSummary.bytes)}`
             : "";
+    const limitText = this.settings ? `；容量上限 ${formatSize(this.settings.cache.maxBytes)}` : "";
     const summaryText =
         (total.count === currentCount
             ? `本地缓存共 ${total.count} 条字幕，共 ${formatSize(total.bytes)}`
             : `本地缓存共 ${total.count} 条字幕，共 ${formatSize(total.bytes)}；当前视频 ${currentCount} 条`) +
-        remoteText;
+        remoteText +
+        limitText;
     section.appendChild(div("info", summaryText));
     if (this.remoteSummary.count > 0) {
       section.appendChild(
@@ -910,13 +1220,11 @@ export class SubtitlePanel {
 
     const dedupeRow = div("row");
     dedupeRow.appendChild(btn("btn btn-ghost btn-sm", "缓存字幕去重", () => {
-      if (
-          confirm(
-              "将按番号合并缓存：同一番号只保留最新的一份字幕，较旧的记录会被删除。\n该操作不可撤销，确定继续？",
-          )
-      ) {
-        this.callbacks.onDeduplicateCache();
-      }
+      void this.showConfirm(
+          "将按番号合并缓存：同一番号只保留最新的一份字幕，较旧的记录会被删除。\n该操作不可撤销，确定继续？",
+      ).then((ok) => {
+        if (ok) this.callbacks.onDeduplicateCache();
+      });
     }));
     const dedupeHint = div("value", "同一番号只保留最新");
     dedupeHint.style.minWidth = "0";
@@ -925,9 +1233,67 @@ export class SubtitlePanel {
     dedupeRow.appendChild(dedupeHint);
     section.appendChild(dedupeRow);
 
+    const cleanupRow = div("row");
+    cleanupRow.appendChild(btn("btn btn-ghost btn-sm", "清理未使用缓存", () => {
+      const days = this.settings?.cache.cleanupAfterDays ?? 90;
+      void this.showConfirm(
+          `将删除超过 ${days} 天未使用、且非当前播放的字幕，确定继续？`,
+      ).then((ok) => {
+        if (ok) this.callbacks.onCleanupCache();
+      });
+    }));
+    const cleanupHint = div(
+        "value",
+        `超过 ${this.settings?.cache.cleanupAfterDays ?? 90} 天未使用`,
+    );
+    cleanupHint.style.minWidth = "0";
+    cleanupHint.style.flex = "1";
+    cleanupHint.style.textAlign = "left";
+    cleanupRow.appendChild(cleanupHint);
+    section.appendChild(cleanupRow);
+
+    const syncRow = div("row");
+    syncRow.appendChild(
+        btn("btn btn-ghost btn-sm", "刷新同步索引", () => this.callbacks.onRefreshSync()),
+    );
+    const syncHint = div("value", "重新发布本地索引并读取其他播放域名");
+    syncHint.style.minWidth = "0";
+    syncHint.style.flex = "1";
+    syncHint.style.textAlign = "left";
+    syncRow.appendChild(syncHint);
+    section.appendChild(syncRow);
+
+    const remoteClearRow = div("row");
+    remoteClearRow.appendChild(btn("btn btn-ghost btn-sm", "清理远程索引", () => {
+      void this.showConfirm(
+          "将删除 GM 存储中其他播放域名的缓存索引，不会删除任何本地字幕。确定继续？",
+      ).then((ok) => {
+        if (ok) this.callbacks.onClearRemoteSync();
+      });
+    }));
+    const remoteClearHint = div("value", "只删同步索引，不删本地字幕");
+    remoteClearHint.style.minWidth = "0";
+    remoteClearHint.style.flex = "1";
+    remoteClearHint.style.textAlign = "left";
+    remoteClearRow.appendChild(remoteClearHint);
+    section.appendChild(remoteClearRow);
+
+    const backfillRow = div("row");
+    backfillRow.appendChild(
+        btn("btn btn-ghost btn-sm", "补齐来源信息", () => this.callbacks.onBackfillSources()),
+    );
+    const backfillHint = div("value", "为旧缓存补上下载地址，便于跨域名恢复");
+    backfillHint.style.minWidth = "0";
+    backfillHint.style.flex = "1";
+    backfillHint.style.textAlign = "left";
+    backfillRow.appendChild(backfillHint);
+    section.appendChild(backfillRow);
+
     const clearRow = div("row");
     clearRow.appendChild(btn("btn btn-danger btn-sm", "清空全部缓存", () => {
-      if (confirm("确定清空所有字幕缓存？该操作不可撤销。")) this.callbacks.onClearCache();
+      void this.showConfirm("确定清空所有字幕缓存？该操作不可撤销。").then((ok) => {
+        if (ok) this.callbacks.onClearCache();
+      });
     }));
     const exportBtn = btn("btn btn-ghost btn-sm", "导出所有字幕", () => this.callbacks.onExportAll());
     exportBtn.disabled = total.count === 0;
@@ -989,6 +1355,7 @@ export class SubtitlePanel {
     slider.max = String(max);
     slider.step = String(step);
     slider.value = String(value);
+    slider.setAttribute("aria-label", label);
 
     const valueEl = div("value", String(value));
     slider.addEventListener("input", () => {
@@ -1013,6 +1380,7 @@ export class SubtitlePanel {
     const input = document.createElement("input");
     input.type = "color";
     input.value = value;
+    input.setAttribute("aria-label", label);
     input.style.width = "44px";
     input.style.height = "26px";
     input.style.padding = "0";
@@ -1046,7 +1414,8 @@ export class SubtitlePanel {
     title: string;
     meta: string;
     active?: boolean;
-    actions: Array<{ label: string; primary?: boolean; danger?: boolean; onClick: () => void }>;
+    reasons?: string[];
+    actions: Array<{ label: string; title?: string; primary?: boolean; danger?: boolean; onClick: () => void }>;
   }): HTMLElement {
     const active = opts.active === true;
     const row = div(`result${active ? " active" : ""}`);
@@ -1054,8 +1423,11 @@ export class SubtitlePanel {
     const head = div("result-head");
     const titleWrap = div("result-title-wrap");
     const titleEl = div("result-title", opts.title);
-    // 超长文件名被省略后，悬停仍能看到完整名称。
-    titleEl.title = opts.title;
+    // 超长文件名被省略后，悬停仍能看到完整名称和评分原因。
+    const reasons = opts.reasons?.filter(Boolean) ?? [];
+    titleEl.title = reasons.length > 0
+        ? `${opts.title}\n匹配原因：${reasons.join("；")}`
+        : opts.title;
     titleWrap.appendChild(titleEl);
     if (active) {
       const badge = document.createElement("span");
@@ -1075,6 +1447,7 @@ export class SubtitlePanel {
       const alreadyActive = active && action.primary;
       if (alreadyActive) classes.push("btn-active");
       const button = btn(classes.join(" "), alreadyActive ? "已使用" : action.label, action.onClick);
+      button.title = action.title ?? action.label;
       if (alreadyActive) button.disabled = true;
       actions.appendChild(button);
     }
@@ -1093,6 +1466,9 @@ export class SubtitlePanel {
     this.clearToast();
 
     const el = div(tone === "warn" ? "toast warn" : "toast", message);
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    el.setAttribute("aria-atomic", "true");
     this.root.appendChild(el);
     this.toastEl = el;
     // 强制一次重排，让 opacity/transform 过渡真正生效。
@@ -1194,6 +1570,7 @@ export class SubtitlePanel {
     window.removeEventListener("resize", this.handleViewportChange);
     window.removeEventListener("scroll", this.handleViewportChange, true);
     this.closePreview();
+    this.closeConfirm(false);
     this.clearToast();
     this.container?.remove();
     this.container = null;

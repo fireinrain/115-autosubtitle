@@ -1,5 +1,3 @@
-type LogLevel = "debug" | "info" | "warn" | "error";
-
 class Logger {
   private enabled = false;
   private prefix = "[115Sub]";

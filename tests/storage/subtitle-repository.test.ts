@@ -19,7 +19,6 @@ function makeRecord(over: Partial<SubtitleRecord> = {}): SubtitleRecord {
     createdAt: Date.now(),
     lastUsedAt: Date.now(),
     parserVersion: 1,
-    isFavorite: false,
     ...over,
   };
 }
@@ -241,5 +240,113 @@ describe("SubtitleRepository", () => {
         expect((await subtitleRepository.replaceByCode("", "keep-test")).removed).toBe(0);
         expect(await subtitleRepository.getById("keep-test")).not.toBeNull();
         expect(await subtitleRepository.getById("no-code")).not.toBeNull();
+    });
+
+    it("保存手动番号时保留已有视频选中记录", async () => {
+        await subtitleRepository.save(makeRecord({id: "manual-sub", videoKey: "v-manual"}));
+        await subtitleRepository.setSelectedForVideo("v-manual", "manual-sub");
+
+        await subtitleRepository.setManualCode("v-manual", "MANUAL-001");
+
+        const record = await subtitleRepository.getVideoRecord("v-manual");
+        expect(record?.code).toBe("MANUAL-001");
+        expect(record?.codeSource).toBe("manual");
+        expect(record?.selectedSubtitleId).toBe("manual-sub");
+    });
+
+    it("没有视频记录时创建手动番号记录", async () => {
+        await subtitleRepository.setManualCode("v-new-manual", "FC2-PPV-123456");
+
+        const record = await subtitleRepository.getVideoRecord("v-new-manual");
+        expect(record?.code).toBe("FC2-PPV-123456");
+        expect(record?.codeSource).toBe("manual");
+        expect(record?.subtitleEnabled).toBe(true);
+    });
+
+    it("按时间清理时保护当前播放字幕", async () => {
+        const old = Date.now() - 100 * 24 * 60 * 60 * 1000;
+        await subtitleRepository.save(makeRecord({id: "old", videoKey: "v-old", lastUsedAt: old}));
+        await subtitleRepository.save(makeRecord({id: "playing", lastUsedAt: old}));
+        await subtitleRepository.save(makeRecord({id: "recent", lastUsedAt: Date.now()}));
+        await subtitleRepository.setSelectedForVideo("v-old", "old");
+
+        const result = await subtitleRepository.cleanup({
+            maxBytes: 0,
+            olderThanDays: 30,
+            protectIds: ["playing"],
+        });
+
+        expect(result.removed).toBe(1);
+        expect(await subtitleRepository.getById("old")).toBeNull();
+        expect(await subtitleRepository.getById("playing")).not.toBeNull();
+        expect(await subtitleRepository.getById("recent")).not.toBeNull();
+        expect(await subtitleRepository.getSelectedForVideo("v-old")).toBeNull();
+    });
+
+
+    it("保存时同步写入纯元数据，删除时一并清理", async () => {
+        const record = makeRecord({
+            id: "meta-1",
+            videoKey: "v-meta",
+            rawBlob: {size: 42} as unknown as Blob,
+        });
+        await subtitleRepository.save(record);
+
+        const metadata = await subtitleRepository.getAllMetadata();
+        expect(metadata).toHaveLength(1);
+        expect(metadata[0].id).toBe("meta-1");
+        expect(metadata[0].size).toBe(42);
+        expect("rawBlob" in metadata[0]).toBe(false);
+        expect("cues" in metadata[0]).toBe(false);
+
+        await subtitleRepository.delete("meta-1");
+        expect(await subtitleRepository.getAllMetadata()).toHaveLength(0);
+    });
+
+    it("去重/替换/清空都会同步清理元数据", async () => {
+        await subtitleRepository.save(makeRecord({id: "meta-old", code: "ABC-123", createdAt: 1}));
+        await subtitleRepository.save(makeRecord({id: "meta-new", code: "ABC-123", createdAt: 2}));
+        await subtitleRepository.deduplicateByCode();
+        expect((await subtitleRepository.getAllMetadata()).map((item) => item.id)).toEqual(["meta-new"]);
+
+        await subtitleRepository.save(makeRecord({id: "meta-keep", code: "ABC-123", createdAt: 3}));
+        await subtitleRepository.replaceByCode("ABC-123", "meta-keep");
+        expect((await subtitleRepository.getAllMetadata()).map((item) => item.id)).toEqual(["meta-keep"]);
+
+        await subtitleRepository.clearAll();
+        expect(await subtitleRepository.getAllMetadata()).toHaveLength(0);
+    });
+
+    it("超出容量时按最近使用时间清理", async () => {
+        const old = Date.now() - 1000;
+        await subtitleRepository.save(
+            makeRecord({
+                id: "size-old",
+                lastUsedAt: old,
+                rawBlob: {size: 100} as unknown as Blob,
+            }),
+        );
+        await subtitleRepository.save(
+            makeRecord({
+                id: "size-mid",
+                lastUsedAt: old + 1,
+                rawBlob: {size: 100} as unknown as Blob,
+            }),
+        );
+        await subtitleRepository.save(
+            makeRecord({
+                id: "size-new",
+                lastUsedAt: old + 2,
+                rawBlob: {size: 100} as unknown as Blob,
+            }),
+        );
+
+        const result = await subtitleRepository.cleanup({maxBytes: 150, olderThanDays: 0});
+
+        expect(result.removed).toBe(2);
+        expect(await subtitleRepository.getById("size-old")).toBeNull();
+        expect(await subtitleRepository.getById("size-mid")).toBeNull();
+        expect(await subtitleRepository.getById("size-new")).not.toBeNull();
+        expect(result.totalBytes).toBe(100);
     });
 });

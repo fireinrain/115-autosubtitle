@@ -25,7 +25,7 @@ export function normalizeFileName(input: string): string {
     .normalize("NFKC")
     .replace(/\.[a-z0-9]{2,5}$/i, "")
     .replace(/[\s_.]+/g, " ")
-    .replace(/[\[\]【】（）()]/g, " ")
+      .replace(/[\u005B\u005D【】（）()]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .toUpperCase();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115 AutoSubtitle
 // @namespace    https://greasyfork.org/zh-CN/scripts/603548
-// @version      0.3.1
+// @version      0.3.2
 // @author       fireinrain
 // @description  115 网盘 / 115 视频播放器字幕助手。支持按番号 / 文件名自动搜索在线字幕，自建字幕叠加层显示，本地 IndexedDB 缓存，多字幕源（迅雷字幕、SubtitleCat）并行搜索。
 // @license      MIT License

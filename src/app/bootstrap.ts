@@ -12,13 +12,61 @@ import {localFileProvider} from "../providers/local-provider";
 import {computeChecksum, uuid} from "../utils/hash";
 import {logger} from "../utils/logger";
 import type {SubtitleSearchResult} from "../providers/provider";
-import type {SubtitleCue} from "../subtitle/subtitle-model";
+import type {SubtitleCue, SubtitleFormat} from "../subtitle/subtitle-model";
 import type {SubtitleRecord} from "../storage/database";
 import type {VideoIdentity} from "../identity/video-identity";
 import {buildSubtitleZip} from "../storage/subtitle-zip";
 import {fileIdFromVideoKey, metadataSync, type RemoteSubtitleMeta} from "../storage/metadata-sync";
 import {autoSearchCache, buildAutoSearchCacheKey} from "../search/search-cache";
 import {isSubtitleError} from "../utils/errors";
+import {convertAssToVtt} from "../subtitle/ass-to-vtt";
+
+interface NormalizedSubtitleSource {
+  bytes: ArrayBuffer;
+  fileName: string;
+  format: SubtitleFormat;
+  /** 原始格式；非 null 表示本次已经转换成 VTT。 */
+  convertedFrom: "ass" | "ssa" | null;
+}
+
+/**
+ * 统一字幕输入：ASS/SSA 默认提取为仅含文字与时间轴的 VTT。
+ *
+ * 转换后的 bytes 会作为新的 rawBlob 落库，后续解析、缓存和导出都按 VTT 处理；
+ * 原始 ASS/SSA 样式、定位、动画和绘图不会保留。
+ */
+function normalizeSubtitleSource(
+    bytes: ArrayBuffer,
+    fileName: string,
+    format: SubtitleFormat,
+): NormalizedSubtitleSource {
+  if (format !== "ass" && format !== "ssa") {
+    return {bytes, fileName, format, convertedFrom: null};
+  }
+
+  const converted = convertAssToVtt(bytes, format);
+  return {
+    bytes: converted.bytes,
+    fileName: withVttExtension(fileName),
+    format: "vtt",
+    convertedFrom: format,
+  };
+}
+
+function withVttExtension(fileName: string): string {
+  if (/\.(ass|ssa)$/i.test(fileName)) return fileName.replace(/\.(ass|ssa)$/i, ".vtt");
+  if (/\.vtt$/i.test(fileName)) return fileName;
+  return `${fileName}.vtt`;
+}
+
+function conversionNote(source: NormalizedSubtitleSource): string | undefined {
+  return source.convertedFrom ? `已将 ${source.convertedFrom.toUpperCase()} 转换为 VTT` : undefined;
+}
+
+function joinNotes(...notes: Array<string | undefined>): string | undefined {
+  const filtered = notes.filter((note): note is string => Boolean(note));
+  return filtered.length > 0 ? filtered.join("；") : undefined;
+}
 
 export async function bootstrap(): Promise<void> {
   logger.info("115 AutoSubtitle 启动中...");
@@ -100,6 +148,16 @@ export async function bootstrap(): Promise<void> {
   /** 用户可见的错误统一走非阻塞 toast，避免 alert 阻断播放器与键盘操作。 */
   function showWarning(message: string): void {
     panel.showToast(message, "warn");
+  }
+
+  /**
+   * 下载文件名可能没有扩展名（例如在线来源标题），此时回退到搜索结果声明的格式。
+   * 解析失败仍会由 parseSubtitle 返回明确错误，不会把未知内容静默当成 SRT。
+   */
+  function resolveDownloadFormat(fileName: string, fallback?: SubtitleFormat): SubtitleFormat {
+    const detected = detectFormat(fileName);
+    if (detected !== "unknown") return detected;
+    return fallback && fallback !== "unknown" ? fallback : "unknown";
   }
 
   /** 视频文件身份 token：优先 115 文件 ID，缺失时退回 videoKey。 */
@@ -238,13 +296,35 @@ export async function bootstrap(): Promise<void> {
   }
 
   /**
-   * 解析器版本升级后，用缓存的原始 Blob 重新解析，避免强制重新下载。
+   * 缓存记录升级：
+   * 1. 旧 ASS/SSA 记录先转换为 VTT，并替换 rawBlob/format/title；
+   * 2. 其余记录在解析器版本落后时用 rawBlob 重新解析。
    * 解析失败时保留原记录，下一次使用还会再尝试，不会破坏用户数据。
    */
   async function ensureCurrentParser(record: SubtitleRecord): Promise<SubtitleRecord> {
-    if (record.parserVersion >= PARSER_VERSION) return record;
-    if (record.format === "ass" || record.format === "ssa") return record;
     try {
+      if (record.format === "ass" || record.format === "ssa") {
+        const bytes = await record.rawBlob.arrayBuffer();
+        const source = normalizeSubtitleSource(bytes, record.title, record.format);
+        const parsed = parseSubtitle(source.bytes, source.format);
+        const updated: SubtitleRecord = {
+          ...record,
+          title: source.fileName,
+          format: source.format,
+          rawBlob: new Blob([source.bytes]),
+          cues: parsed.cues,
+          cueCount: parsed.cues.length,
+          encoding: parsed.encoding,
+          checksum: await computeChecksum(source.bytes),
+          parserVersion: PARSER_VERSION,
+        };
+        await subtitleRepository.save(updated);
+        logger.info(`已将缓存字幕从 ${record.format.toUpperCase()} 转换为 VTT：${record.title}`);
+        return updated;
+      }
+
+      if (record.parserVersion >= PARSER_VERSION) return record;
+
       const bytes = await record.rawBlob.arrayBuffer();
       const parsed = parseSubtitle(bytes, record.format, record.encoding);
       const updated: SubtitleRecord = {
@@ -258,7 +338,7 @@ export async function bootstrap(): Promise<void> {
       logger.info(`已按解析器 v${PARSER_VERSION} 重新解析缓存字幕：${record.title}`);
       return updated;
     } catch (e) {
-      logger.warn(`重新解析缓存字幕失败，保留原记录：${record.title}`, e);
+      logger.warn(`升级/重新解析缓存字幕失败，保留原记录：${record.title}`, e);
       return record;
     }
   }
@@ -337,23 +417,20 @@ export async function bootstrap(): Promise<void> {
   async function handleImportFile(file: File): Promise<void> {
     try {
       const { bytes, fileName } = await localFileProvider.fromFile(file);
-      const format = detectFormat(fileName);
-      if (format === "unknown") {
+      const detected = detectFormat(fileName);
+      if (detected === "unknown") {
         showWarning("不支持的字幕格式");
         return;
       }
-      if (format === "ass" || format === "ssa") {
-        showWarning("暂不支持 ASS/SSA 字幕解析，请导入 SRT/VTT 文件。");
-        return;
-      }
-      const parsed = parseSubtitle(bytes, format);
+      const source = normalizeSubtitleSource(bytes, fileName, detected);
+      const parsed = parseSubtitle(source.bytes, source.format);
       const identity = controller.getCurrentIdentity();
       if (!identity) {
         showWarning("未检测到视频");
         return;
       }
 
-      const checksum = await computeChecksum(bytes);
+      const checksum = await computeChecksum(source.bytes);
       const duplicate = await subtitleRepository.findByChecksum(identity.videoKey, checksum);
       if (duplicate) {
         const current = await ensureCurrentParser(duplicate);
@@ -368,9 +445,9 @@ export async function bootstrap(): Promise<void> {
         videoKey: identity.videoKey,
         code: currentManualCode || identity.code || "",
         providerId: "local",
-        title: fileName,
-        format,
-        rawBlob: new Blob([bytes]),
+        title: source.fileName,
+        format: source.format,
+        rawBlob: new Blob([source.bytes]),
         encoding: parsed.encoding,
         cues: parsed.cues,
         cueCount: parsed.cues.length,
@@ -384,15 +461,18 @@ export async function bootstrap(): Promise<void> {
       const replaced = await replaceCachedByCode(record.code, record.id);
       await subtitleRepository.setSelectedForVideo(identity.videoKey, record.id);
       applySubtitle(
-          fileName,
+          source.fileName,
           record.id,
           parsed.cues,
-          replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : undefined,
+          joinNotes(
+              replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : undefined,
+              conversionNote(source),
+          ),
       );
       void refreshCacheList();
       publishMetadata();
       void enforceCacheLimit();
-      logger.info(`已加载本地字幕：${fileName}（${parsed.cues.length} 条）`);
+      logger.info(`已加载本地字幕：${source.fileName}（${parsed.cues.length} 条）`);
     } catch (e) {
       const msg = isSubtitleError(e) ? e.message : "导入字幕失败";
       showWarning(msg);
@@ -599,7 +679,6 @@ export async function bootstrap(): Promise<void> {
     const provider = providerManager.get(meta.providerId);
     const providerEnabled = currentSettings.providers[meta.providerId]?.enabled ?? true;
     if (!provider || !providerEnabled || !meta.sourceResult) return false;
-    if (meta.format === "ass" || meta.format === "ssa") return false;
 
     const token = identityToken(identity);
     const epoch = searchEpoch;
@@ -616,16 +695,18 @@ export async function bootstrap(): Promise<void> {
       if (!latestIdentity) return false;
       if (!allowReplace && controller.getCurrentSubtitleId()) return false;
 
-      const format = detectFormat(download.fileName);
-      if (format === "unknown" || format === "ass" || format === "ssa") {
+      const detected = resolveDownloadFormat(download.fileName, meta.format);
+      if (detected === "unknown") {
         logger.warn(`跨播放域名恢复失败：不支持的字幕格式 ${download.fileName}`);
         return false;
       }
-      const parsed = parseSubtitle(download.bytes, format);
+      const source = normalizeSubtitleSource(download.bytes, download.fileName, detected);
+      const parsed = parseSubtitle(source.bytes, source.format);
+      const checksum = source.convertedFrom ? await computeChecksum(source.bytes) : download.checksum;
 
       const duplicate = await subtitleRepository.findByChecksum(
           latestIdentity.videoKey,
-          download.checksum,
+          checksum,
       );
       if (duplicate) {
         let current = duplicate;
@@ -653,14 +734,14 @@ export async function bootstrap(): Promise<void> {
         code: currentManualCode || meta.code || latestIdentity.code || "",
         providerId: meta.providerId,
         sourceId: meta.sourceId,
-        title: meta.title,
+        title: source.convertedFrom ? withVttExtension(meta.title) : meta.title,
         language: meta.language,
-        format,
-        rawBlob: new Blob([download.bytes]),
+        format: source.format,
+        rawBlob: new Blob([source.bytes]),
         encoding: parsed.encoding,
         cues: parsed.cues,
         cueCount: parsed.cues.length,
-        checksum: download.checksum,
+        checksum,
         createdAt: meta.createdAt,
         lastUsedAt: Date.now(),
         parserVersion: PARSER_VERSION,
@@ -670,9 +751,12 @@ export async function bootstrap(): Promise<void> {
       await subtitleRepository.save(record);
       const replaced = await replaceCachedByCode(record.code, record.id);
       await subtitleRepository.setSelectedForVideo(latestIdentity.videoKey, record.id);
-      const note = replaced > 0
-          ? `已从 ${meta.origin} 恢复，替换 ${replaced} 条旧缓存`
-          : `已从 ${meta.origin} 恢复`;
+      const note = joinNotes(
+          replaced > 0
+              ? `已从 ${meta.origin} 恢复，替换 ${replaced} 条旧缓存`
+              : `已从 ${meta.origin} 恢复`,
+          conversionNote(source),
+      );
       applySubtitle(record.title, record.id, parsed.cues, note);
       void refreshCacheList();
       publishMetadata();
@@ -711,10 +795,6 @@ export async function bootstrap(): Promise<void> {
         showWarning(`未找到字幕来源：${result.providerId}`);
         return;
       }
-      if (result.format === "ass" || result.format === "ssa") {
-        showWarning("暂不支持 ASS/SSA 字幕解析，请选择 SRT/VTT 结果；如需保留文件可点「下载」。");
-        return;
-      }
       const identity = controller.getCurrentIdentity();
 
       // 同一视频、同一来源、同一 sourceId 已经缓存过，就不再重复下载。
@@ -748,18 +828,21 @@ export async function bootstrap(): Promise<void> {
       logger.info(`开始使用在线字幕：${result.providerId}/${result.title}`);
       panel.showToast("正在下载并解析字幕…");
       const download = await provider.download(result, abort.signal);
-      const format = detectFormat(download.fileName);
-      if (format === "unknown" || format === "ass" || format === "ssa") {
-        showWarning("暂不支持该字幕格式，当前仅支持 SRT/VTT。");
+      const detected = resolveDownloadFormat(download.fileName, result.format);
+      if (detected === "unknown") {
+        showWarning("暂不支持该字幕格式，当前仅支持 SRT/VTT/ASS/SSA。");
         return;
       }
-      const parsed = parseSubtitle(download.bytes, format);
+      const source = normalizeSubtitleSource(download.bytes, download.fileName, detected);
+      const parsed = parseSubtitle(source.bytes, source.format);
+      const checksum = source.convertedFrom ? await computeChecksum(source.bytes) : download.checksum;
+      const title = source.convertedFrom ? withVttExtension(result.title) : result.title;
 
       if (identity) {
         // 不同来源可能提供内容完全相同的字幕，下载后用 checksum 再判一次。
         const duplicate = await subtitleRepository.findByChecksum(
             identity.videoKey,
-            download.checksum,
+            checksum,
         );
         if (duplicate) {
           let current = duplicate;
@@ -785,14 +868,14 @@ export async function bootstrap(): Promise<void> {
           code: currentManualCode || result.code || identity.code || "",
           providerId: result.providerId,
           sourceId: result.sourceId,
-          title: result.title,
+          title,
           language: result.language,
-          format,
-          rawBlob: new Blob([download.bytes]),
+          format: source.format,
+          rawBlob: new Blob([source.bytes]),
           encoding: parsed.encoding,
           cues: parsed.cues,
           cueCount: parsed.cues.length,
-          checksum: download.checksum,
+          checksum,
           createdAt: Date.now(),
           lastUsedAt: Date.now(),
           parserVersion: PARSER_VERSION,
@@ -812,12 +895,15 @@ export async function bootstrap(): Promise<void> {
           logger.warn("写入字幕缓存失败，但仍应用字幕", e);
         }
         applySubtitle(
-            result.title,
+            title,
             record.id,
             parsed.cues,
-            cacheFailed
-                ? "字幕已生效，但缓存写入失败"
-                : replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : undefined,
+            joinNotes(
+                cacheFailed
+                    ? "字幕已生效，但缓存写入失败"
+                    : replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : undefined,
+                conversionNote(source),
+            ),
         );
         void refreshCacheList();
         if (!cacheFailed) {
@@ -825,7 +911,7 @@ export async function bootstrap(): Promise<void> {
           void enforceCacheLimit();
         }
       } else {
-        applySubtitle(result.title, null, parsed.cues);
+        applySubtitle(title, null, parsed.cues, conversionNote(source));
         logger.info("已加载字幕但未检测到视频，无法关联缓存");
       }
     } catch (e) {
@@ -845,23 +931,21 @@ export async function bootstrap(): Promise<void> {
         showWarning(`未找到字幕来源：${result.providerId}`);
         return;
       }
-      if (result.format === "ass" || result.format === "ssa") {
-        showWarning("暂不支持 ASS/SSA 字幕预览，当前仅支持 SRT/VTT。");
-        return;
-      }
       const download = await provider.download(result, abort.signal);
-      const format = detectFormat(download.fileName);
-      if (format === "unknown" || format === "ass" || format === "ssa") {
-        showWarning("暂不支持该字幕格式，当前仅支持 SRT/VTT。");
+      const detected = resolveDownloadFormat(download.fileName, result.format);
+      if (detected === "unknown") {
+        showWarning("暂不支持该字幕格式，当前仅支持 SRT/VTT/ASS/SSA。");
         return;
       }
-      const parsed = parseSubtitle(download.bytes, format);
+      const source = normalizeSubtitleSource(download.bytes, download.fileName, detected);
+      const parsed = parseSubtitle(source.bytes, source.format);
       // 预览保留时间轴：序号与时间轴同一行，字幕正文另起一行。
       let content = formatCuesWithTimestamps(parsed.cues);
       if (!content.trim()) {
-        content = decodeRawSubtitle(download.bytes, parsed.encoding);
+        content = decodeRawSubtitle(source.bytes, parsed.encoding);
       }
-      panel.showPreview(result.title, limitPreviewText(content.trim() ? content : "（无字幕内容）"));
+      const title = source.convertedFrom ? withVttExtension(result.title) : result.title;
+      panel.showPreview(title, limitPreviewText(content.trim() ? content : "（无字幕内容）"));
     } catch (e) {
       if (abort.signal.aborted) return;
       showWarning(isSubtitleError(e) ? e.message : "预览字幕失败");
@@ -880,16 +964,27 @@ export async function bootstrap(): Promise<void> {
         return;
       }
       const download = await provider.download(result, abort.signal);
-      const blob = new Blob([download.bytes], { type: "text/plain;charset=utf-8" });
+      const detected = resolveDownloadFormat(download.fileName, result.format);
+      let source: NormalizedSubtitleSource;
+      try {
+        source = normalizeSubtitleSource(download.bytes, download.fileName, detected);
+      } catch (e) {
+        // 下载是用户显式导出动作：转换失败时退回原始文件，避免什么都拿不到。
+        if (detected !== "ass" && detected !== "ssa") throw e;
+        logger.warn("ASS/SSA 转换失败，回退下载原始文件", e);
+        source = {bytes: download.bytes, fileName: download.fileName, format: detected, convertedFrom: null};
+      }
+      const blob = new Blob([source.bytes], {type: "text/plain;charset=utf-8"});
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = download.fileName;
+      a.download = source.fileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      logger.info(`已下载字幕：${download.fileName}`);
+      if (source.convertedFrom) panel.showToast(`已将 ${source.convertedFrom.toUpperCase()} 转换为 VTT 下载`);
+      logger.info(`已下载字幕：${source.fileName}`);
     } catch (e) {
       if (abort.signal.aborted) return;
       showWarning(isSubtitleError(e) ? e.message : "下载字幕失败");
@@ -978,10 +1073,11 @@ export async function bootstrap(): Promise<void> {
               ? await subtitleRepository.getSelectedForVideo(identity.videoKey)
               : null;
           if (selected) {
-            controller.selectSubtitle(selected.id, selected.cues);
+            const current = await ensureCurrentParser(selected);
+            controller.selectSubtitle(current.id, current.cues);
             controller.setSubtitleVisible(true);
             panel.setSubtitleVisible(true);
-            panel.setCurrentSubtitle(selected.title, selected.id);
+            panel.setCurrentSubtitle(current.title, current.id);
           } else {
             controller.clearSubtitle();
             panel.setCurrentSubtitle(null);

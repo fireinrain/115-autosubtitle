@@ -1,17 +1,13 @@
-import type { VideoIdentity } from "../identity/video-identity";
-import type { SubtitleSearchResult } from "../providers/provider";
-import { providerManager, type ProviderState, type SearchProgress } from "../search/provider-manager";
-import type { GlobalSettings, SubtitleStyleSettings } from "../settings/settings-service";
-import {FONT_PRESETS, findFontPreset, normalizeFontFamily} from "../settings/font-presets";
-import type { SubtitleRecord } from "../storage/database";
+import type {VideoIdentity} from "../identity/video-identity";
+import type {SubtitleSearchResult} from "../providers/provider";
+import {providerManager, type ProviderState, type SearchProgress} from "../search/provider-manager";
+import type {GlobalSettings, SubtitleStyleSettings} from "../settings/settings-service";
+import {findFontPreset, FONT_PRESETS, normalizeFontFamily} from "../settings/font-presets";
+import type {SubtitleRecord} from "../storage/database";
 import type {RemoteCacheSummary, RemoteSubtitleMeta} from "../storage/metadata-sync";
 import {throttle} from "../utils/debounce";
 import {logger} from "../utils/logger";
-import {
-  decodeRawSubtitle,
-  formatCuesWithTimestamps,
-  limitPreviewText,
-} from "../subtitle/preview";
+import {decodeRawSubtitle, formatCuesWithTimestamps, limitPreviewText,} from "../subtitle/preview";
 
 export interface PanelCallbacks {
   onImportFile: (file: File) => void;
@@ -846,7 +842,7 @@ export class SubtitlePanel {
     const importBtn = btn("btn btn-ghost", "导入本地字幕", () => fileInput.click());
     const fileInput = document.createElement("input");
     fileInput.type = "file";
-    fileInput.accept = ".srt,.vtt";
+    fileInput.accept = ".srt,.vtt,.ass,.ssa";
     fileInput.style.display = "none";
     fileInput.addEventListener("change", () => {
       const file = fileInput.files?.[0];

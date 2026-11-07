@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115 AutoSubtitle
 // @namespace    https://greasyfork.org/zh-CN/scripts/603548
-// @version      0.3.1
+// @version      0.3.2
 // @author       fireinrain
 // @description  115 网盘 / 115 视频播放器字幕助手。支持按番号 / 文件名自动搜索在线字幕，自建字幕叠加层显示，本地 IndexedDB 缓存，多字幕源（迅雷字幕、SubtitleCat）并行搜索。
 // @license      MIT License
@@ -1865,7 +1865,7 @@
 		const minutes = Math.floor(total % 36e5 / 6e4);
 		const seconds = Math.floor(total % 6e4 / 1e3);
 		const millis = total % 1e3;
-		return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(seconds, 2)},${pad(millis, 3)}`;
+		return `${pad$1(hours, 2)}:${pad$1(minutes, 2)}:${pad$1(seconds, 2)},${pad$1(millis, 3)}`;
 	}
 	function limitPreviewText(text) {
 		const lines = text.split("\n");
@@ -1883,7 +1883,8 @@
 		if (!truncated) return text;
 		return `${result}\n\n…（字幕较长，仅显示前 ${Math.min(lines.length, PREVIEW_MAX_LINES)} 行）`;
 	}
-	function pad(value, length) {
+
+	function pad$1(value, length) {
 		return String(value).padStart(length, "0");
 	}
 	var TABS = [
@@ -2583,7 +2584,7 @@
 			const importBtn = btn("btn btn-ghost", "导入本地字幕", () => fileInput.click());
 			const fileInput = document.createElement("input");
 			fileInput.type = "file";
-			fileInput.accept = ".srt,.vtt";
+			fileInput.accept = ".srt,.vtt,.ass,.ssa";
 			fileInput.style.display = "none";
 			fileInput.addEventListener("change", () => {
 				const file = fileInput.files?.[0];
@@ -3498,6 +3499,399 @@
 		}
 	};
 	var subtitleSearchEngine = new SubtitleSearchEngine();
+	var AssParser = class {
+		format;
+
+		constructor(format = "ass") {
+			this.format = format === "ssa" ? "ssa" : "ass";
+		}
+
+		parse(bytes, encoding) {
+			const text = encodingDetector.decode(bytes, encoding);
+			const warnings = [];
+			const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+			let section = "";
+			let scriptType = "";
+			let eventFormat = null;
+			let hasEventsSection = false;
+			let hasStyleDefinitions = false;
+			let missingFormat = false;
+			let sawUnsupportedTag = false;
+			let sawDrawing = false;
+			const cues = [];
+			let sourceOrder = 0;
+			for (const rawLine of lines) {
+				const line = rawLine.trim();
+				if (!line) continue;
+				if (line.startsWith("[") && line.endsWith("]")) {
+					section = line.slice(1, -1).trim().toLowerCase();
+					if (section === "events") hasEventsSection = true;
+					continue;
+				}
+				if (section === "script info") {
+					const match = line.match(/^scripttype\s*:\s*(.+)$/i);
+					if (match) scriptType = match[1].trim().toLowerCase();
+					continue;
+				}
+				if (section === "v4+ styles" || section === "v4 styles") {
+					if (/^style\s*:/i.test(line)) hasStyleDefinitions = true;
+					continue;
+				}
+				if (section !== "events") continue;
+				if (/^format\s*:/i.test(line)) {
+					const fields = line.slice(line.indexOf(":") + 1).split(",").map((field) => field.trim().toLowerCase()).filter(Boolean);
+					if (fields.length > 0) eventFormat = fields;
+					continue;
+				}
+				if (!/^dialogue\s*:/i.test(line)) continue;
+				const format = eventFormat ?? defaultEventFormat(scriptType, this.format);
+				if (!eventFormat) missingFormat = true;
+				const payload = line.slice(line.indexOf(":") + 1).trimStart();
+				const fields = splitEventFields(payload, format.length);
+				if (fields.length < format.length) {
+					warnings.push(`Dialogue 字段不足，已跳过：${payload.slice(0, 40)}`);
+					continue;
+				}
+				const startIndex = format.indexOf("start");
+				const endIndex = format.indexOf("end");
+				const textIndex = format.indexOf("text");
+				if (startIndex < 0 || endIndex < 0 || textIndex < 0) {
+					warnings.push(`Dialogue Format 缺少 Start/End/Text 字段，已跳过：${payload.slice(0, 40)}`);
+					continue;
+				}
+				const startMs = parseAssTime(fields[startIndex]);
+				const endMs = parseAssTime(fields[endIndex]);
+				if (startMs === null || endMs === null) {
+					warnings.push(`无法解析 ASS 时间轴：${fields[startIndex]} -> ${fields[endIndex]}`);
+					continue;
+				}
+				if (endMs < startMs) {
+					warnings.push(`时间范围反向：${startMs} -> ${endMs}`);
+					continue;
+				}
+				const rawText = fields[textIndex] ?? "";
+				if (!rawText.trim()) {
+					warnings.push("空字幕文本已跳过");
+					continue;
+				}
+				const parsedText = parseAssText(rawText);
+				if (parsedText.sawUnsupportedTag) sawUnsupportedTag = true;
+				if (parsedText.sawDrawing) sawDrawing = true;
+				if (!parsedText.text.trim()) {
+					warnings.push(`仅包含绘图或空文本的 Dialogue 已跳过：${rawText.slice(0, 40)}`);
+					continue;
+				}
+				cues.push({
+					id: cues.length,
+					startMs,
+					endMs,
+					text: parsedText.text,
+					segments: parsedText.segments,
+					sourceOrder: sourceOrder++
+				});
+			}
+			if (!hasEventsSection) throw new SubtitleError("PARSE_FAILED", "ASS/SSA 文件缺少 [Events] 段");
+			if (missingFormat) warnings.push("Event 段缺少 Format 行，已使用默认字段顺序");
+			if (hasStyleDefinitions) warnings.push("ASS/SSA 转换：已忽略样式定义");
+			if (sawUnsupportedTag) warnings.push("ASS/SSA 转换：已忽略定位、动画、字体、描边等覆盖标签");
+			if (sawDrawing) warnings.push("ASS/SSA 转换：已忽略 \\p 绘图指令");
+			if (cues.length === 0) warnings.push("未找到可显示的 Dialogue 字幕");
+			return {
+				format: this.format,
+				encoding: encoding ?? encodingDetector.detect(bytes),
+				cues,
+				warnings
+			};
+		}
+	};
+
+	function defaultEventFormat(scriptType, fallback) {
+		return (scriptType.includes("v4.00") && !scriptType.includes("v4.00+") ? true : scriptType.includes("v4.00+") ? false : fallback === "ssa") ? [
+			"marked",
+			"start",
+			"end",
+			"style",
+			"name",
+			"marginl",
+			"marginr",
+			"marginv",
+			"effect",
+			"text"
+		] : [
+			"layer",
+			"start",
+			"end",
+			"style",
+			"name",
+			"marginl",
+			"marginr",
+			"marginv",
+			"effect",
+			"text"
+		];
+	}
+
+	function splitEventFields(payload, count) {
+		const fields = [];
+		let rest = payload;
+		for (let i = 0; i < count - 1; i++) {
+			const comma = rest.indexOf(",");
+			if (comma < 0) {
+				fields.push(rest);
+				return fields;
+			}
+			fields.push(rest.slice(0, comma));
+			rest = rest.slice(comma + 1);
+		}
+		fields.push(rest);
+		return fields;
+	}
+
+	function parseAssTime(value) {
+		const match = value.trim().match(/^(\d+):(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?$/);
+		if (!match) return null;
+		const hours = Number(match[1]);
+		const minutes = Number(match[2]);
+		const seconds = Number(match[3]);
+		const fraction = match[4] ?? "0";
+		let millis;
+		if (fraction.length === 1) millis = Number(fraction) * 100;
+		else if (fraction.length === 2) millis = Number(fraction) * 10;
+		else millis = Number(fraction);
+		if (![
+			hours,
+			minutes,
+			seconds,
+			millis
+		].every(isFiniteNumber)) return null;
+		return hours * 36e5 + minutes * 6e4 + seconds * 1e3 + millis;
+	}
+
+	function parseAssText(raw) {
+		const segments = [];
+		const state = {
+			bold: false,
+			italic: false,
+			underline: false,
+			drawing: false
+		};
+		let text = "";
+		let buffer = "";
+		let sawUnsupportedTag = false;
+		let sawDrawing = false;
+		const flush = () => {
+			if (!buffer) return;
+			if (!state.drawing) {
+				const segment = {text: buffer};
+				if (state.bold) segment.bold = true;
+				if (state.italic) segment.italic = true;
+				if (state.underline) segment.underline = true;
+				if (state.color) segment.color = state.color;
+				segments.push(segment);
+				text += buffer;
+			}
+			buffer = "";
+		};
+		let i = 0;
+		while (i < raw.length) {
+			const char = raw[i];
+			if (char === "{") {
+				flush();
+				const end = raw.indexOf("}", i + 1);
+				if (end === -1) {
+					buffer += raw.slice(i);
+					break;
+				}
+				const result = applyOverrideBlock(raw.slice(i + 1, end), state);
+				if (result.sawUnsupportedTag) sawUnsupportedTag = true;
+				if (result.sawDrawing) sawDrawing = true;
+				i = end + 1;
+				continue;
+			}
+			if (char === "\\") {
+				const next = raw[i + 1];
+				if (next === "N" || next === "n") {
+					buffer += "\n";
+					i += 2;
+					continue;
+				}
+				if (next === "h") {
+					buffer += " ";
+					i += 2;
+					continue;
+				}
+				if (next === "{" || next === "}") {
+					buffer += next;
+					i += 2;
+					continue;
+				}
+				buffer += char;
+				i++;
+				continue;
+			}
+			buffer += char;
+			i++;
+		}
+		flush();
+		return {
+			text,
+			segments,
+			sawUnsupportedTag,
+			sawDrawing
+		};
+	}
+
+	function applyOverrideBlock(block, state) {
+		let sawUnsupportedTag = false;
+		let sawDrawing = false;
+		let i = 0;
+		while (i < block.length) {
+			if (block[i] !== "\\") {
+				i++;
+				continue;
+			}
+			i++;
+			const nameStart = i;
+			while (i < block.length && isAsciiDigit(block[i])) i++;
+			while (i < block.length && isAsciiLetter(block[i])) i++;
+			const name = block.slice(nameStart, i).toLowerCase();
+			if (!name) continue;
+			let args;
+			if (block[i] === "(") {
+				const end = findClosingParen(block, i);
+				args = block.slice(i + 1, end);
+				i = end < block.length ? end + 1 : block.length;
+			} else if (block[i] === "&") {
+				const end = block.indexOf("&", i + 1);
+				if (end === -1) {
+					args = block.slice(i);
+					i = block.length;
+				} else {
+					args = block.slice(i, end + 1);
+					i = end + 1;
+				}
+			} else {
+				const next = block.indexOf("\\", i);
+				const end = next === -1 ? block.length : next;
+				args = block.slice(i, end);
+				i = end;
+			}
+			switch (name) {
+				case "b":
+					state.bold = parseToggle(args);
+					break;
+				case "i":
+					state.italic = parseToggle(args);
+					break;
+				case "u":
+					state.underline = parseToggle(args);
+					break;
+				case "c":
+				case "1c": {
+					const value = args.trim();
+					if (!value) {
+						state.color = void 0;
+						break;
+					}
+					const color = parseAssColor(value);
+					if (color) state.color = color;
+					else sawUnsupportedTag = true;
+					break;
+				}
+				case "r":
+					state.bold = false;
+					state.italic = false;
+					state.underline = false;
+					state.color = void 0;
+					if (args.trim()) sawUnsupportedTag = true;
+					break;
+				case "p": {
+					const drawing = args.trim() !== "" && Number(args) > 0;
+					state.drawing = drawing;
+					if (drawing) sawDrawing = true;
+					break;
+				}
+				default:
+					sawUnsupportedTag = true;
+			}
+		}
+		return {
+			sawUnsupportedTag,
+			sawDrawing
+		};
+	}
+
+	function findClosingParen(value, openIndex) {
+		let depth = 0;
+		for (let i = openIndex; i < value.length; i++) if (value[i] === "(") depth++;
+		else if (value[i] === ")") {
+			depth--;
+			if (depth === 0) return i;
+		}
+		return value.length;
+	}
+
+	function parseToggle(args) {
+		const value = args.trim();
+		if (!value) return false;
+		const numeric = Number(value);
+		return isFiniteNumber(numeric) ? numeric !== 0 : true;
+	}
+
+	function parseAssColor(raw) {
+		const match = raw.trim().match(/^&H([0-9a-f]{1,8})&?$/i);
+		if (!match) return null;
+		const value = match[1].toUpperCase();
+		const bgr = value.length > 6 ? value.slice(-6) : value.padStart(6, "0");
+		const blue = bgr.slice(0, 2);
+		const green = bgr.slice(2, 4);
+		return `#${bgr.slice(4, 6)}${green}${blue}`;
+	}
+
+	function isAsciiDigit(char) {
+		return char >= "0" && char <= "9";
+	}
+
+	function isAsciiLetter(char) {
+		return char >= "a" && char <= "z" || char >= "A" && char <= "Z";
+	}
+
+	function convertAssToVtt(bytes, format, encoding) {
+		const parsed = new AssParser(format).parse(bytes, encoding);
+		const text = serializeCuesToVtt(parsed.cues);
+		return {
+			bytes: new TextEncoder().encode(text).buffer,
+			text,
+			warnings: parsed.warnings
+		};
+	}
+
+	function serializeCuesToVtt(cues) {
+		const blocks = [];
+		for (const cue of cues) {
+			const body = normalizeCueText(cue.text);
+			if (!body) continue;
+			blocks.push(`${formatVttTime(cue.startMs)} --> ${formatVttTime(cue.endMs)}\n${body}`);
+		}
+		return blocks.length > 0 ? `WEBVTT\n\n${blocks.join("\n\n")}\n` : "WEBVTT\n\n";
+	}
+
+	function normalizeCueText(text) {
+		return text.replace(/\r\n?/g, "\n").replace(/\n{2,}/g, "\n").trim();
+	}
+
+	function formatVttTime(ms) {
+		const total = Math.max(0, Math.round(ms));
+		const hours = Math.floor(total / 36e5);
+		const minutes = Math.floor(total % 36e5 / 6e4);
+		const seconds = Math.floor(total % 6e4 / 1e3);
+		const millis = total % 1e3;
+		return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(seconds, 2)}.${pad(millis, 3)}`;
+	}
+
+	function pad(value, length) {
+		return String(value).padStart(length, "0");
+	}
 	var SrtParser = class {
 		format = "srt";
 		parse(bytes, encoding) {
@@ -3594,6 +3988,15 @@
 		switch (format) {
 			case "srt": return new SrtParser().parse(bytes, encoding);
 			case "vtt": return new VttParser().parse(bytes, encoding);
+			case "ass":
+			case "ssa": {
+				const converted = convertAssToVtt(bytes, format, encoding);
+				const parsed = new VttParser().parse(converted.bytes, "utf-8");
+				return {
+					...parsed,
+					warnings: [...converted.warnings, ...parsed.warnings]
+				};
+			}
 			default: throw new SubtitleError("UNSUPPORTED_FORMAT", `不支持的字幕格式：${format}`);
 		}
 	}
@@ -4233,6 +4636,36 @@
 		}
 	};
 	var autoSearchCache = new AutoSearchCache();
+
+	function normalizeSubtitleSource(bytes, fileName, format) {
+		if (format !== "ass" && format !== "ssa") return {
+			bytes,
+			fileName,
+			format,
+			convertedFrom: null
+		};
+		return {
+			bytes: convertAssToVtt(bytes, format).bytes,
+			fileName: withVttExtension(fileName),
+			format: "vtt",
+			convertedFrom: format
+		};
+	}
+
+	function withVttExtension(fileName) {
+		if (/\.(ass|ssa)$/i.test(fileName)) return fileName.replace(/\.(ass|ssa)$/i, ".vtt");
+		if (/\.vtt$/i.test(fileName)) return fileName;
+		return `${fileName}.vtt`;
+	}
+
+	function conversionNote(source) {
+		return source.convertedFrom ? `已将 ${source.convertedFrom.toUpperCase()} 转换为 VTT` : void 0;
+	}
+
+	function joinNotes(...notes) {
+		const filtered = notes.filter((note) => Boolean(note));
+		return filtered.length > 0 ? filtered.join("；") : void 0;
+	}
 	async function bootstrap() {
 		logger.info("115 AutoSubtitle 启动中...");
 		const settings = await settingsService.load();
@@ -4297,6 +4730,12 @@
 		}
 		function showWarning(message) {
 			panel.showToast(message, "warn");
+		}
+
+		function resolveDownloadFormat(fileName, fallback) {
+			const detected = detectFormat(fileName);
+			if (detected !== "unknown") return detected;
+			return fallback && fallback !== "unknown" ? fallback : "unknown";
 		}
 		function identityToken(identity) {
 			if (!identity) return "";
@@ -4401,22 +4840,39 @@
 			panel.showToast(hasCueNow ? `已使用：${title}${suffix}` : `已使用：${title}${suffix}（当前时间点没有字幕，拖动进度条查看）`, hasCueNow ? "success" : "warn");
 		}
 		async function ensureCurrentParser(record) {
-			if (record.parserVersion >= 2) return record;
-			if (record.format === "ass" || record.format === "ssa") return record;
 			try {
+				if (record.format === "ass" || record.format === "ssa") {
+					const source = normalizeSubtitleSource(await record.rawBlob.arrayBuffer(), record.title, record.format);
+					const parsed = parseSubtitle(source.bytes, source.format);
+					const updated = {
+						...record,
+						title: source.fileName,
+						format: source.format,
+						rawBlob: new Blob([source.bytes]),
+						cues: parsed.cues,
+						cueCount: parsed.cues.length,
+						encoding: parsed.encoding,
+						checksum: await computeChecksum(source.bytes),
+						parserVersion: 4
+					};
+					await subtitleRepository.save(updated);
+					logger.info(`已将缓存字幕从 ${record.format.toUpperCase()} 转换为 VTT：${record.title}`);
+					return updated;
+				}
+				if (record.parserVersion >= 4) return record;
 				const parsed = parseSubtitle(await record.rawBlob.arrayBuffer(), record.format, record.encoding);
 				const updated = {
 					...record,
 					cues: parsed.cues,
 					cueCount: parsed.cues.length,
 					encoding: parsed.encoding,
-					parserVersion: 2
+					parserVersion: 4
 				};
 				await subtitleRepository.save(updated);
-				logger.info(`已按解析器 v2 重新解析缓存字幕：${record.title}`);
+				logger.info(`已按解析器 v4 重新解析缓存字幕：${record.title}`);
 				return updated;
 			} catch (e) {
-				logger.warn(`重新解析缓存字幕失败，保留原记录：${record.title}`, e);
+				logger.warn(`升级/重新解析缓存字幕失败，保留原记录：${record.title}`, e);
 				return record;
 			}
 		}
@@ -4489,22 +4945,19 @@
 		async function handleImportFile(file) {
 			try {
 				const { bytes, fileName } = await localFileProvider.fromFile(file);
-				const format = detectFormat(fileName);
-				if (format === "unknown") {
+				const detected = detectFormat(fileName);
+				if (detected === "unknown") {
 					showWarning("不支持的字幕格式");
 					return;
 				}
-				if (format === "ass" || format === "ssa") {
-					showWarning("暂不支持 ASS/SSA 字幕解析，请导入 SRT/VTT 文件。");
-					return;
-				}
-				const parsed = parseSubtitle(bytes, format);
+				const source = normalizeSubtitleSource(bytes, fileName, detected);
+				const parsed = parseSubtitle(source.bytes, source.format);
 				const identity = controller.getCurrentIdentity();
 				if (!identity) {
 					showWarning("未检测到视频");
 					return;
 				}
-				const checksum = await computeChecksum(bytes);
+				const checksum = await computeChecksum(source.bytes);
 				const duplicate = await subtitleRepository.findByChecksum(identity.videoKey, checksum);
 				if (duplicate) {
 					const current = await ensureCurrentParser(duplicate);
@@ -4519,25 +4972,25 @@
 					videoKey: identity.videoKey,
 					code: currentManualCode || identity.code || "",
 					providerId: "local",
-					title: fileName,
-					format,
-					rawBlob: new Blob([bytes]),
+					title: source.fileName,
+					format: source.format,
+					rawBlob: new Blob([source.bytes]),
 					encoding: parsed.encoding,
 					cues: parsed.cues,
 					cueCount: parsed.cues.length,
 					checksum,
 					createdAt: Date.now(),
 					lastUsedAt: Date.now(),
-					parserVersion: 2
+					parserVersion: 4
 				};
 				await subtitleRepository.save(record);
 				const replaced = await replaceCachedByCode(record.code, record.id);
 				await subtitleRepository.setSelectedForVideo(identity.videoKey, record.id);
-				applySubtitle(fileName, record.id, parsed.cues, replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : void 0);
+				applySubtitle(source.fileName, record.id, parsed.cues, joinNotes(replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : void 0, conversionNote(source)));
 				refreshCacheList();
 				publishMetadata();
 				enforceCacheLimit();
-				logger.info(`已加载本地字幕：${fileName}（${parsed.cues.length} 条）`);
+				logger.info(`已加载本地字幕：${source.fileName}（${parsed.cues.length} 条）`);
 			} catch (e) {
 				showWarning(isSubtitleError(e) ? e.message : "导入字幕失败");
 				logger.error("导入字幕失败", e);
@@ -4672,7 +5125,6 @@
 			const provider = providerManager.get(meta.providerId);
 			const providerEnabled = currentSettings.providers[meta.providerId]?.enabled ?? true;
 			if (!provider || !providerEnabled || !meta.sourceResult) return false;
-			if (meta.format === "ass" || meta.format === "ssa") return false;
 			const token = identityToken(identity);
 			const epoch = searchEpoch;
 			const abort = beginDownload();
@@ -4683,13 +5135,15 @@
 				const latestIdentity = await waitForStableIdentity(token, 3e3, abort.signal);
 				if (!latestIdentity) return false;
 				if (!allowReplace && controller.getCurrentSubtitleId()) return false;
-				const format = detectFormat(download.fileName);
-				if (format === "unknown" || format === "ass" || format === "ssa") {
+				const detected = resolveDownloadFormat(download.fileName, meta.format);
+				if (detected === "unknown") {
 					logger.warn(`跨播放域名恢复失败：不支持的字幕格式 ${download.fileName}`);
 					return false;
 				}
-				const parsed = parseSubtitle(download.bytes, format);
-				const duplicate = await subtitleRepository.findByChecksum(latestIdentity.videoKey, download.checksum);
+				const source = normalizeSubtitleSource(download.bytes, download.fileName, detected);
+				const parsed = parseSubtitle(source.bytes, source.format);
+				const checksum = source.convertedFrom ? await computeChecksum(source.bytes) : download.checksum;
+				const duplicate = await subtitleRepository.findByChecksum(latestIdentity.videoKey, checksum);
 				if (duplicate) {
 					let current = duplicate;
 					if (!current.sourceResult && meta.sourceResult) {
@@ -4713,23 +5167,23 @@
 					code: currentManualCode || meta.code || latestIdentity.code || "",
 					providerId: meta.providerId,
 					sourceId: meta.sourceId,
-					title: meta.title,
+					title: source.convertedFrom ? withVttExtension(meta.title) : meta.title,
 					language: meta.language,
-					format,
-					rawBlob: new Blob([download.bytes]),
+					format: source.format,
+					rawBlob: new Blob([source.bytes]),
 					encoding: parsed.encoding,
 					cues: parsed.cues,
 					cueCount: parsed.cues.length,
-					checksum: download.checksum,
+					checksum,
 					createdAt: meta.createdAt,
 					lastUsedAt: Date.now(),
-					parserVersion: 2,
+					parserVersion: 4,
 					sourceResult: meta.sourceResult
 				};
 				await subtitleRepository.save(record);
 				const replaced = await replaceCachedByCode(record.code, record.id);
 				await subtitleRepository.setSelectedForVideo(latestIdentity.videoKey, record.id);
-				const note = replaced > 0 ? `已从 ${meta.origin} 恢复，替换 ${replaced} 条旧缓存` : `已从 ${meta.origin} 恢复`;
+				const note = joinNotes(replaced > 0 ? `已从 ${meta.origin} 恢复，替换 ${replaced} 条旧缓存` : `已从 ${meta.origin} 恢复`, conversionNote(source));
 				applySubtitle(record.title, record.id, parsed.cues, note);
 				refreshCacheList();
 				publishMetadata();
@@ -4762,10 +5216,6 @@
 					showWarning(`未找到字幕来源：${result.providerId}`);
 					return;
 				}
-				if (result.format === "ass" || result.format === "ssa") {
-					showWarning("暂不支持 ASS/SSA 字幕解析，请选择 SRT/VTT 结果；如需保留文件可点「下载」。");
-					return;
-				}
 				const identity = controller.getCurrentIdentity();
 				if (identity) {
 					const cached = await subtitleRepository.findBySource(identity.videoKey, result.providerId, result.sourceId);
@@ -4794,14 +5244,17 @@
 				logger.info(`开始使用在线字幕：${result.providerId}/${result.title}`);
 				panel.showToast("正在下载并解析字幕…");
 				const download = await provider.download(result, abort.signal);
-				const format = detectFormat(download.fileName);
-				if (format === "unknown" || format === "ass" || format === "ssa") {
-					showWarning("暂不支持该字幕格式，当前仅支持 SRT/VTT。");
+				const detected = resolveDownloadFormat(download.fileName, result.format);
+				if (detected === "unknown") {
+					showWarning("暂不支持该字幕格式，当前仅支持 SRT/VTT/ASS/SSA。");
 					return;
 				}
-				const parsed = parseSubtitle(download.bytes, format);
+				const source = normalizeSubtitleSource(download.bytes, download.fileName, detected);
+				const parsed = parseSubtitle(source.bytes, source.format);
+				const checksum = source.convertedFrom ? await computeChecksum(source.bytes) : download.checksum;
+				const title = source.convertedFrom ? withVttExtension(result.title) : result.title;
 				if (identity) {
-					const duplicate = await subtitleRepository.findByChecksum(identity.videoKey, download.checksum);
+					const duplicate = await subtitleRepository.findByChecksum(identity.videoKey, checksum);
 					if (duplicate) {
 						let current = duplicate;
 						try {
@@ -4829,17 +5282,17 @@
 						code: currentManualCode || result.code || identity.code || "",
 						providerId: result.providerId,
 						sourceId: result.sourceId,
-						title: result.title,
+						title,
 						language: result.language,
-						format,
-						rawBlob: new Blob([download.bytes]),
+						format: source.format,
+						rawBlob: new Blob([source.bytes]),
 						encoding: parsed.encoding,
 						cues: parsed.cues,
 						cueCount: parsed.cues.length,
-						checksum: download.checksum,
+						checksum,
 						createdAt: Date.now(),
 						lastUsedAt: Date.now(),
-						parserVersion: 2,
+						parserVersion: 4,
 						sourceResult: result
 					};
 					let replaced = 0;
@@ -4852,14 +5305,14 @@
 						cacheFailed = true;
 						logger.warn("写入字幕缓存失败，但仍应用字幕", e);
 					}
-					applySubtitle(result.title, record.id, parsed.cues, cacheFailed ? "字幕已生效，但缓存写入失败" : replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : void 0);
+					applySubtitle(title, record.id, parsed.cues, joinNotes(cacheFailed ? "字幕已生效，但缓存写入失败" : replaced > 0 ? `已替换同番号旧缓存 ${replaced} 条` : void 0, conversionNote(source)));
 					refreshCacheList();
 					if (!cacheFailed) {
 						publishMetadata();
 						enforceCacheLimit();
 					}
 				} else {
-					applySubtitle(result.title, null, parsed.cues);
+					applySubtitle(title, null, parsed.cues, conversionNote(source));
 					logger.info("已加载字幕但未检测到视频，无法关联缓存");
 				}
 			} catch (e) {
@@ -4878,20 +5331,18 @@
 					showWarning(`未找到字幕来源：${result.providerId}`);
 					return;
 				}
-				if (result.format === "ass" || result.format === "ssa") {
-					showWarning("暂不支持 ASS/SSA 字幕预览，当前仅支持 SRT/VTT。");
-					return;
-				}
 				const download = await provider.download(result, abort.signal);
-				const format = detectFormat(download.fileName);
-				if (format === "unknown" || format === "ass" || format === "ssa") {
-					showWarning("暂不支持该字幕格式，当前仅支持 SRT/VTT。");
+				const detected = resolveDownloadFormat(download.fileName, result.format);
+				if (detected === "unknown") {
+					showWarning("暂不支持该字幕格式，当前仅支持 SRT/VTT/ASS/SSA。");
 					return;
 				}
-				const parsed = parseSubtitle(download.bytes, format);
+				const source = normalizeSubtitleSource(download.bytes, download.fileName, detected);
+				const parsed = parseSubtitle(source.bytes, source.format);
 				let content = formatCuesWithTimestamps(parsed.cues);
-				if (!content.trim()) content = decodeRawSubtitle(download.bytes, parsed.encoding);
-				panel.showPreview(result.title, limitPreviewText(content.trim() ? content : "（无字幕内容）"));
+				if (!content.trim()) content = decodeRawSubtitle(source.bytes, parsed.encoding);
+				const title = source.convertedFrom ? withVttExtension(result.title) : result.title;
+				panel.showPreview(title, limitPreviewText(content.trim() ? content : "（无字幕内容）"));
 			} catch (e) {
 				if (abort.signal.aborted) return;
 				showWarning(isSubtitleError(e) ? e.message : "预览字幕失败");
@@ -4909,16 +5360,31 @@
 					return;
 				}
 				const download = await provider.download(result, abort.signal);
-				const blob = new Blob([download.bytes], { type: "text/plain;charset=utf-8" });
+				const detected = resolveDownloadFormat(download.fileName, result.format);
+				let source;
+				try {
+					source = normalizeSubtitleSource(download.bytes, download.fileName, detected);
+				} catch (e) {
+					if (detected !== "ass" && detected !== "ssa") throw e;
+					logger.warn("ASS/SSA 转换失败，回退下载原始文件", e);
+					source = {
+						bytes: download.bytes,
+						fileName: download.fileName,
+						format: detected,
+						convertedFrom: null
+					};
+				}
+				const blob = new Blob([source.bytes], {type: "text/plain;charset=utf-8"});
 				const url = URL.createObjectURL(blob);
 				const a = document.createElement("a");
 				a.href = url;
-				a.download = download.fileName;
+				a.download = source.fileName;
 				document.body.appendChild(a);
 				a.click();
 				document.body.removeChild(a);
 				setTimeout(() => URL.revokeObjectURL(url), 1e3);
-				logger.info(`已下载字幕：${download.fileName}`);
+				if (source.convertedFrom) panel.showToast(`已将 ${source.convertedFrom.toUpperCase()} 转换为 VTT 下载`);
+				logger.info(`已下载字幕：${source.fileName}`);
 			} catch (e) {
 				if (abort.signal.aborted) return;
 				showWarning(isSubtitleError(e) ? e.message : "下载字幕失败");
@@ -4990,10 +5456,11 @@
 						const identity = controller.getCurrentIdentity();
 						const selected = identity ? await subtitleRepository.getSelectedForVideo(identity.videoKey) : null;
 						if (selected) {
-							controller.selectSubtitle(selected.id, selected.cues);
+							const current = await ensureCurrentParser(selected);
+							controller.selectSubtitle(current.id, current.cues);
 							controller.setSubtitleVisible(true);
 							panel.setSubtitleVisible(true);
-							panel.setCurrentSubtitle(selected.title, selected.id);
+							panel.setCurrentSubtitle(current.title, current.id);
 						} else {
 							controller.clearSubtitle();
 							panel.setCurrentSubtitle(null);

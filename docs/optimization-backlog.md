@@ -1,7 +1,7 @@
 # 优化清单与已知限制
 
-> 基线：2026-11-03，版本 `0.3.0`，生产构建 `dist/115-subtitle-assistant.user.js`。
-> 验证基线：`npm run lint`、`npm run typecheck` 通过；`npm test` 20 个文件 / 178 个用例通过；`npm run build` 通过。
+> 基线：2026-11-07，版本 `0.3.2`，生产构建 `dist/115-subtitle-assistant.user.js`。
+> 验证基线：`npm run lint`、`npm run typecheck` 通过；`npm test` 22 个文件 / 200 个用例通过；`npm run build` 通过。
 > 已完成真实页面验证：旧/新播放页、视频切换、跨播放域名元数据同步与自动恢复、手动番号持久化、同步索引刷新、清理入口、快捷键、ZIP
 > 导出与去重。
 > 本轮未完成真实浏览器验证：原生桌面全屏、移动端/窄视口手工验收。
@@ -10,7 +10,7 @@
 
 - 旧播放页 `115vod.com` 与新播放页 `115.com/players/video/*`，CC 入口与 Shadow DOM overlay。
 - 番号识别、手动番号持久化、迅雷 / SubtitleCat 并行搜索、评分排序去重、匹配原因提示。
-- SRT / VTT 解析；ASS/SSA 只识别不解析，作为已知限制。
+- SRT / VTT 解析；ASS/SSA 默认转换为只含时间轴和纯文本的 VTT，完整渲染不在当前范围。
 - 时间轴同步、样式与偏移、字幕拖动定位、预览、单文件下载、缓存 ZIP 导出。
 - IndexedDB 缓存、跨视频隔离、同番号自动替换、手动去重、按天/容量清理。
 - 无缓存自动搜索，带 15 分钟 TTL 查询缓存；只提示结果，不自动应用。
@@ -34,6 +34,7 @@
 | 3.9 阻塞式 alert / confirm | ✅ 已完成         | 用户可见错误改 toast；去重/清理/清空/远程清理改异步确认弹层                                                                                         |
 | 3.10 Provider 健康/限流/重试  | ✅ 已完成         | 来源检测按钮；全局并发 3、同 host 250ms；网络错误/5xx 一次退避重试；失败来源 60s 冷却，手动搜索可强制重试                                                           |
 | 3.11 新版选择器脆弱            | ✅ 已完成         | 保留文本定位，新增 aria-label/title fallback；找不到时只记录一次结构诊断                                                                          |
+| 3.12 ASS/SSA 自动转 VTT    | ✅ 已完成         | `ass-parser.ts` 提取 Dialogue 时间轴/文本，`ass-to-vtt.ts` 输出纯文本 VTT；丢弃样式/定位/动画/绘图，缓存格式统一为 vtt                                     |
 | 4.2 lint / format       | ✅ 已完成（lint）   | 新增 ESLint 9 + typescript-eslint 与 `npm run lint`，CI 已接入；未做全仓库 Prettier 格式化，避免无关 diff                                       |
 | 4.3 缓存数据库演进             | ✅ 已完成         | DB v2 + `subtitleMeta` 迁移；`PARSER_VERSION` + 按需重解析                                                                         |
 | 4.5 可访问性与移动端            | 🟡 代码完成，待真机验收 | tablist/tab/tabpanel、aria-selected、方向键、range/color aria-label、toast aria-live、dialog 焦点、`:focus-visible`、窄屏 CSS；尚未做移动端真机验收 |
@@ -57,7 +58,8 @@
 
 ## 4. 已知限制
 
-- ASS/SSA 不解析，只按扩展名识别并返回不支持错误。
+- ASS/SSA 完整渲染未实现：当前自动转换为只有文字和时间轴的 VTT，样式表、定位、动画、卡拉 OK、绘图和完整排版不保留；转换后的缓存不保留原始
+  ASS/SSA 字节。
 - 自动搜索缓存 TTL 内不会重新请求；需要最新结果时可手动搜索。
 - 旧缓存若无法从在线来源精确匹配 `providerId + sourceId`，仍无法补来源信息。
 - 下载地址可能过期或来源下线，跨域恢复失败时回退自动搜索。

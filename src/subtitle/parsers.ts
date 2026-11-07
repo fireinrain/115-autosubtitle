@@ -1,8 +1,13 @@
-import type { ParsedSubtitle, SubtitleCue, SubtitleFormat, SubtitleSegment } from "./subtitle-model";
-import { encodingDetector } from "./encoding-detector";
-import { SubtitleError } from "../utils/errors";
+import type {ParsedSubtitle, SubtitleCue, SubtitleFormat, SubtitleSegment} from "./subtitle-model";
+import {encodingDetector} from "./encoding-detector";
+import {SubtitleError} from "../utils/errors";
+import {convertAssToVtt} from "./ass-to-vtt";
 
-export const PARSER_VERSION = 2;
+/**
+ * 解析器输出模型版本；升级后会用缓存的 rawBlob 按需重新解析。
+ * v4：ASS/SSA 改为先转换成 VTT 再解析，缓存格式统一为 vtt。
+ */
+export const PARSER_VERSION = 4;
 
 export interface SubtitleParser {
   readonly format: SubtitleFormat;
@@ -133,6 +138,16 @@ export function parseSubtitle(bytes: ArrayBuffer, format: SubtitleFormat, encodi
       return new SrtParser().parse(bytes, encoding);
     case "vtt":
       return new VttParser().parse(bytes, encoding);
+      case "ass":
+      case "ssa": {
+          // 默认把 ASS/SSA 视为「纯文本 + 时间轴」来源：先转成 VTT，再走统一 VTT 解析。
+          const converted = convertAssToVtt(bytes, format, encoding);
+          const parsed = new VttParser().parse(converted.bytes, "utf-8");
+          return {
+              ...parsed,
+              warnings: [...converted.warnings, ...parsed.warnings],
+          };
+      }
     default:
       throw new SubtitleError("UNSUPPORTED_FORMAT", `不支持的字幕格式：${format}`);
   }

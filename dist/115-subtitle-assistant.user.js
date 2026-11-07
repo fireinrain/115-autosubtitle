@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         115 AutoSubtitle
 // @namespace    https://greasyfork.org/zh-CN/scripts/603548
-// @version      0.3.2
+// @version      0.3.3
 // @author       fireinrain
 // @description  115 网盘 / 115 视频播放器字幕助手。支持按番号 / 文件名自动搜索在线字幕，自建字幕叠加层显示，本地 IndexedDB 缓存，多字幕源（迅雷字幕、SubtitleCat）并行搜索。
 // @license      MIT License
@@ -1883,7 +1883,6 @@
 		if (!truncated) return text;
 		return `${result}\n\n…（字幕较长，仅显示前 ${Math.min(lines.length, PREVIEW_MAX_LINES)} 行）`;
 	}
-
 	function pad$1(value, length) {
 		return String(value).padStart(length, "0");
 	}
@@ -3501,11 +3500,9 @@
 	var subtitleSearchEngine = new SubtitleSearchEngine();
 	var AssParser = class {
 		format;
-
 		constructor(format = "ass") {
 			this.format = format === "ssa" ? "ssa" : "ass";
 		}
-
 		parse(bytes, encoding) {
 			const text = encodingDetector.decode(bytes, encoding);
 			const warnings = [];
@@ -3604,7 +3601,6 @@
 			};
 		}
 	};
-
 	function defaultEventFormat(scriptType, fallback) {
 		return (scriptType.includes("v4.00") && !scriptType.includes("v4.00+") ? true : scriptType.includes("v4.00+") ? false : fallback === "ssa") ? [
 			"marked",
@@ -3630,7 +3626,6 @@
 			"text"
 		];
 	}
-
 	function splitEventFields(payload, count) {
 		const fields = [];
 		let rest = payload;
@@ -3646,7 +3641,6 @@
 		fields.push(rest);
 		return fields;
 	}
-
 	function parseAssTime(value) {
 		const match = value.trim().match(/^(\d+):(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?$/);
 		if (!match) return null;
@@ -3666,7 +3660,6 @@
 		].every(isFiniteNumber)) return null;
 		return hours * 36e5 + minutes * 6e4 + seconds * 1e3 + millis;
 	}
-
 	function parseAssText(raw) {
 		const segments = [];
 		const state = {
@@ -3682,7 +3675,7 @@
 		const flush = () => {
 			if (!buffer) return;
 			if (!state.drawing) {
-				const segment = {text: buffer};
+				const segment = { text: buffer };
 				if (state.bold) segment.bold = true;
 				if (state.italic) segment.italic = true;
 				if (state.underline) segment.underline = true;
@@ -3740,7 +3733,6 @@
 			sawDrawing
 		};
 	}
-
 	function applyOverrideBlock(block, state) {
 		let sawUnsupportedTag = false;
 		let sawDrawing = false;
@@ -3811,8 +3803,7 @@
 					if (drawing) sawDrawing = true;
 					break;
 				}
-				default:
-					sawUnsupportedTag = true;
+				default: sawUnsupportedTag = true;
 			}
 		}
 		return {
@@ -3820,7 +3811,6 @@
 			sawDrawing
 		};
 	}
-
 	function findClosingParen(value, openIndex) {
 		let depth = 0;
 		for (let i = openIndex; i < value.length; i++) if (value[i] === "(") depth++;
@@ -3830,14 +3820,12 @@
 		}
 		return value.length;
 	}
-
 	function parseToggle(args) {
 		const value = args.trim();
 		if (!value) return false;
 		const numeric = Number(value);
 		return isFiniteNumber(numeric) ? numeric !== 0 : true;
 	}
-
 	function parseAssColor(raw) {
 		const match = raw.trim().match(/^&H([0-9a-f]{1,8})&?$/i);
 		if (!match) return null;
@@ -3847,15 +3835,12 @@
 		const green = bgr.slice(2, 4);
 		return `#${bgr.slice(4, 6)}${green}${blue}`;
 	}
-
 	function isAsciiDigit(char) {
 		return char >= "0" && char <= "9";
 	}
-
 	function isAsciiLetter(char) {
 		return char >= "a" && char <= "z" || char >= "A" && char <= "Z";
 	}
-
 	function convertAssToVtt(bytes, format, encoding) {
 		const parsed = new AssParser(format).parse(bytes, encoding);
 		const text = serializeCuesToVtt(parsed.cues);
@@ -3865,7 +3850,6 @@
 			warnings: parsed.warnings
 		};
 	}
-
 	function serializeCuesToVtt(cues) {
 		const blocks = [];
 		for (const cue of cues) {
@@ -3875,11 +3859,9 @@
 		}
 		return blocks.length > 0 ? `WEBVTT\n\n${blocks.join("\n\n")}\n` : "WEBVTT\n\n";
 	}
-
 	function normalizeCueText(text) {
 		return text.replace(/\r\n?/g, "\n").replace(/\n{2,}/g, "\n").trim();
 	}
-
 	function formatVttTime(ms) {
 		const total = Math.max(0, Math.round(ms));
 		const hours = Math.floor(total / 36e5);
@@ -3888,7 +3870,6 @@
 		const millis = total % 1e3;
 		return `${pad(hours, 2)}:${pad(minutes, 2)}:${pad(seconds, 2)}.${pad(millis, 3)}`;
 	}
-
 	function pad(value, length) {
 		return String(value).padStart(length, "0");
 	}
@@ -4636,7 +4617,6 @@
 		}
 	};
 	var autoSearchCache = new AutoSearchCache();
-
 	function normalizeSubtitleSource(bytes, fileName, format) {
 		if (format !== "ass" && format !== "ssa") return {
 			bytes,
@@ -4651,17 +4631,14 @@
 			convertedFrom: format
 		};
 	}
-
 	function withVttExtension(fileName) {
 		if (/\.(ass|ssa)$/i.test(fileName)) return fileName.replace(/\.(ass|ssa)$/i, ".vtt");
 		if (/\.vtt$/i.test(fileName)) return fileName;
 		return `${fileName}.vtt`;
 	}
-
 	function conversionNote(source) {
 		return source.convertedFrom ? `已将 ${source.convertedFrom.toUpperCase()} 转换为 VTT` : void 0;
 	}
-
 	function joinNotes(...notes) {
 		const filtered = notes.filter((note) => Boolean(note));
 		return filtered.length > 0 ? filtered.join("；") : void 0;
@@ -4731,7 +4708,6 @@
 		function showWarning(message) {
 			panel.showToast(message, "warn");
 		}
-
 		function resolveDownloadFormat(fileName, fallback) {
 			const detected = detectFormat(fileName);
 			if (detected !== "unknown") return detected;
@@ -5374,7 +5350,7 @@
 						convertedFrom: null
 					};
 				}
-				const blob = new Blob([source.bytes], {type: "text/plain;charset=utf-8"});
+				const blob = new Blob([source.bytes], { type: "text/plain;charset=utf-8" });
 				const url = URL.createObjectURL(blob);
 				const a = document.createElement("a");
 				a.href = url;
